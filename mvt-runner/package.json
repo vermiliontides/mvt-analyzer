@@ -1,0 +1,22 @@
+{
+  "name": "mvt-runner",
+  "version": "1.0.0",
+  "description": "Idempotent wrapper around mvt-ios for analyzing a directory of encrypted iPhone backups.",
+  "type": "module",
+  "bin": {
+    "mvt-runner": "./dist/main.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/main.js",
+    "dev": "tsx main.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  }
+}
