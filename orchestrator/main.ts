@@ -1,18 +1,33 @@
 /**
  * orchestrator/main.ts
  *
- * Conductor for a full investigation run. Creates a pipeline_run, invokes
- * each extractor as an isolated subprocess stage, records per-stage status,
- * and — critically — NEVER lets one stage's failure abort the others.
+ * Conductor for a full investigation run. Creates a pipeline_run PER BACKUP,
+ * invokes each extractor as an isolated subprocess stage, records per-stage
+ * status, and — critically — NEVER lets one stage's (or one backup's)
+ * failure abort the others.
  *
  * This file intentionally does not know how to parse any source format.
  * That's the extractors' job (see /extractors/*, /contracts/EXTRACTOR_CONTRACT.md).
  * This file only knows how to run a stage, record what happened, and move on.
+ *
+ * Multi-backup note: mvt-runner (../mvt-runner) is the upstream tool that
+ * decrypts a directory of raw iPhone backups into
+ * <workspace>/decrypted/<name>/, one directory per backup, prompting
+ * interactively for each backup's password as it goes. By the time this
+ * orchestrator runs, that's already done — every backup it processes here
+ * is decrypted and sitting on disk. There is no interactivity to reconcile
+ * at this layer; the only real gap was that this file used to assume a
+ * single --backup-path. It now accepts N backups and runs a full,
+ * independent pipeline against each — one failing backup (or one failing
+ * stage within a backup) never blocks the others.
  */
 
 import { spawn } from "node:child_process";
 import { Client } from "pg";
 import { randomUUID } from "node:crypto";
+import { parseArgs } from "node:util";
+import * as fsp from "node:fs/promises";
+import * as path from "node:path";
 
 interface StageDefinition {
   name: string;
@@ -104,17 +119,74 @@ function runStage(
   });
 }
 
-async function main() {
-  const backupPath = process.argv[2];
-  if (!backupPath) {
-    console.error("Usage: main.ts <path-to-decrypted-backup>");
-    process.exit(1);
-  }
+interface CliConfig {
+  backupPaths: string[];
+  dbUrl: string;
+}
+
+function printUsage() {
+  console.error(`Usage:
+  main.ts --workspace <mvt-runner-workspace-dir>
+      Discovers every backup already decrypted by mvt-runner under
+      <workspace>/decrypted/*, and runs the full pipeline against each.
+
+  main.ts <path-to-decrypted-backup> [<path> ...]
+      Runs the full pipeline against one or more explicit decrypted-backup
+      directories (bypassing mvt-runner's workspace convention).`);
+}
+
+async function parseCliConfig(): Promise<CliConfig> {
+  const { values, positionals } = parseArgs({
+    args: process.argv.slice(2),
+    options: {
+      workspace: { type: "string" },
+    },
+    allowPositionals: true,
+  });
 
   const dbUrl = process.env.DATABASE_URL ?? "postgresql://localhost:5432/forensics";
-  const client = new Client({ connectionString: dbUrl });
-  await client.connect();
 
+  if (values.workspace) {
+    const decryptedDir = path.join(values.workspace, "decrypted");
+    let entries;
+    try {
+      entries = await fsp.readdir(decryptedDir, { withFileTypes: true });
+    } catch (err) {
+      console.error(
+        `[orchestrator] could not read ${decryptedDir}: ${err instanceof Error ? err.message : err}`
+      );
+      console.error(`[orchestrator] has mvt-runner been run against this workspace yet?`);
+      process.exit(1);
+    }
+    const backupPaths = entries
+      .filter((e) => e.isDirectory())
+      .map((e) => path.join(decryptedDir, e.name))
+      .sort();
+    if (backupPaths.length === 0) {
+      console.error(`[orchestrator] no decrypted backups found under ${decryptedDir}`);
+      process.exit(1);
+    }
+    return { backupPaths, dbUrl };
+  }
+
+  if (positionals.length === 0) {
+    printUsage();
+    process.exit(1);
+  }
+  return { backupPaths: positionals, dbUrl };
+}
+
+/**
+ * Runs the full stage pipeline against a single backup. Never throws —
+ * a backup-level failure (e.g. Postgres unreachable mid-run) is caught by
+ * the caller's per-backup try/catch in main(), so one bad backup can't
+ * take down the ones after it in the same invocation.
+ */
+async function runPipelineForBackup(
+  client: Client,
+  backupPath: string,
+  dbUrl: string
+): Promise<{ runId: string; results: { stage: string; success: boolean }[] }> {
   const runId = await createRun(client, backupPath);
   console.log(`[orchestrator] run ${runId} started against ${backupPath}`);
 
@@ -139,16 +211,54 @@ async function main() {
   }
 
   await client.query(`UPDATE pipeline_runs SET finished_at = now() WHERE run_id = $1`, [runId]);
+  return { runId, results };
+}
+
+async function main() {
+  const cfg = await parseCliConfig();
+
+  const dbUrl = cfg.dbUrl;
+  const client = new Client({ connectionString: dbUrl });
+  await client.connect();
+
+  console.log(`[orchestrator] processing ${cfg.backupPaths.length} backup(s)`);
+
+  const summary: { backupPath: string; runId?: string; failedStages: string[]; error?: string }[] = [];
+
+  for (const backupPath of cfg.backupPaths) {
+    console.log(`\n[orchestrator] ===== ${backupPath} =====`);
+    try {
+      const { runId, results } = await runPipelineForBackup(client, backupPath, dbUrl);
+      const failedStages = results.filter((r) => !r.success).map((r) => r.stage);
+      summary.push({ backupPath, runId, failedStages });
+    } catch (err) {
+      // A failure here means something broke outside per-stage handling
+      // (e.g. couldn't even create the pipeline_run row) — log it against
+      // this backup and move on to the next one rather than aborting the
+      // whole multi-backup invocation.
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[orchestrator] backup-level failure for ${backupPath}: ${message}`);
+      summary.push({ backupPath, failedStages: [], error: message });
+    }
+  }
+
   await client.end();
 
-  const failed = results.filter((r) => !r.success);
-  console.log("\n[orchestrator] run complete");
-  console.log(`  run_id: ${runId}`);
-  console.log(`  succeeded: ${results.length - failed.length}/${results.length}`);
-  if (failed.length > 0) {
-    console.log(`  failed stages: ${failed.map((f) => f.stage).join(", ")}`);
-    console.log(`  -> the report will note these as unavailable; fix and re-run the pipeline`);
-    console.log(`     against the same backup to fill them in (idempotent, no need to redo successful stages).`);
+  console.log("\n[orchestrator] all backups processed");
+  for (const s of summary) {
+    if (s.error) {
+      console.log(`  ${s.backupPath}: FAILED before stages ran — ${s.error}`);
+    } else if (s.failedStages.length === 0) {
+      console.log(`  ${s.backupPath}: run ${s.runId} — all stages succeeded`);
+    } else {
+      console.log(`  ${s.backupPath}: run ${s.runId} — failed stages: ${s.failedStages.join(", ")}`);
+    }
+  }
+
+  const anyFailed = summary.some((s) => s.error || s.failedStages.length > 0);
+  if (anyFailed) {
+    console.log(`\n  -> fix and re-run against the same workspace/backups to fill in gaps`);
+    console.log(`     (idempotent — already-succeeded stages will not be redone).`);
   }
 }
 

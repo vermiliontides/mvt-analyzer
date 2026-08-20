@@ -56,32 +56,25 @@ isolated, not fatal" in [`docs/architecture.md`](docs/architecture.md).
 ## Running it locally
 
 ```bash
-# 1. Start Postgres (migrations auto-apply on first boot via docker-entrypoint-initdb.d)
+# 1. Start Postgres (fresh volume: migrations auto-apply via docker-entrypoint-initdb.d)
 cd infra && docker compose up -d
 
-# 2. Install orchestrator deps
+# 1a. Applying a new migration to an already-running database (not a fresh
+#     volume)? The docker-entrypoint hook above only fires once, on first
+#     boot, so use the migration runner instead:
+python3 ../db/migrate.py --db-url postgresql://forensics:forensics_dev_only@localhost:5432/forensics
+
+# 2. Decrypt your backups with mvt-runner (separate tool, see mvt-runner/)
+cd ../mvt-runner && npm install && npm run build
+node dist/main.js --source ~/iPhone-Backups --workspace ~/mvt-workspace
+
+# 3. Install orchestrator deps
 cd ../orchestrator && pnpm install   # or npm/yarn — see package.json
 
-# 3. Run the pipeline against a decrypted backup
+# 4. Run the pipeline against everything mvt-runner just decrypted
 DATABASE_URL=postgresql://forensics:forensics_dev_only@localhost:5432/forensics \
-  pnpm run investigate /path/to/decrypted/backup
-```
+  pnpm run investigate --workspace ~/mvt-workspace
 
-## Adding a new extractor
-
-See [`contracts/EXTRACTOR_CONTRACT.md`](contracts/EXTRACTOR_CONTRACT.md)
-for the full process-level contract (invocation, exit codes, idempotency,
-output shape, failure handling). Short version: any language is fine as
-long as it satisfies that contract and validates every record it writes
-against the shared `NormalizedRecord` schema
-(`contracts/normalized-record.schema.json`).
-
-## Status
-
-| Domain | Extractor status |
-| :--- | :--- |
-| Crash telemetry (`.ips`) | Migrating from standalone script — see `extractors/crash/README.md` |
-| Safari history | Not yet built |
-| SMS | Not yet built |
-| Network usage | Not yet built |
-| gcloud logs | Not yet built |
+# ...or against specific decrypted-backup directories directly:
+DATABASE_URL=postgresql://forensics:forensics_dev_only@localhost:5432/forensics \
+  pnpm run investigate /path/to/decrypted/backup-a /path/to/decrypted/backup-b

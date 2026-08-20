@@ -73,8 +73,54 @@ def render_stage_preface(stages: list[dict]) -> list[str]:
 # should never need to know the internal shape of, say, safari_history's
 # fields to render crash_report's section, matching the extractor contract's
 # ownership boundaries.
+def render_crash_section(records: list[dict]) -> list[str]:
+    lines = ["## Crash Reports", "", "| Incident | Process | PID | Bug Type | Event Time |", "| :--- | :--- | :--- | :--- | :--- |"]
+    for r in records:
+        lines.append(
+            f"| `{r['incident_id'] or 'N/A'}` | {r['process_name'] or 'Unknown'} "
+            f"| `{r['pid']}` | `{r['bug_type']}` | `{r['event_time'] or 'unknown'}` |"
+        )
+    lines.append("")
+
+    for r in records:
+        fields = r["fields"] or {}
+        lines.append(f"### `{r['incident_id'] or fields.get('filename', 'unknown')}`")
+        lines.append(f"- **Source file:** `{fields.get('filename')}`")
+        lines.append(
+            f"- **OS:** `{fields.get('os_version')}` | **Hardware:** `{fields.get('hardware_model')}` "
+            f"| **Arch:** `{fields.get('cpu_type')}`"
+        )
+        lines.append(
+            f"- **Bundle:** `{r['bundle_id']}` (`{fields.get('bundle_version')}`)"
+        )
+        lines.append(
+            f"- **Process:** `{r['process_name']}` (PID `{r['pid']}`), spawned by "
+            f"`{fields.get('parent_proc')}` (PID `{fields.get('parent_pid')}`)"
+        )
+        exc = fields.get("exception") or {}
+        if exc:
+            lines.append(
+                f"- **Exception:** `{exc.get('type')}` / signal `{exc.get('signal')}` "
+                f"(code `{exc.get('code')}`, subcode `{exc.get('subcode')}`)"
+            )
+        term = fields.get("termination") or {}
+        if term:
+            lines.append(
+                f"- **Termination:** namespace `{term.get('namespace')}`, code `{term.get('code')}`, "
+                f"by `{term.get('by')}`"
+            )
+        asi = fields.get("asi") or []
+        if asi:
+            lines.append("- **Application Specific Info:**")
+            for msg in asi:
+                lines.append(f"  > `{msg}`")
+        lines.append("")
+
+    return lines
+
+
 RENDERERS = {
-    # "crash_report": render_crash_section,
+    "crash_report": render_crash_section,
     # "safari_history": render_safari_section,
     # ...
 }

@@ -107,7 +107,7 @@ def extract_rich_telemetry(data: dict) -> dict:
         "time_awake_since_boot": payload.get("timeAwakeSinceBoot"),
         "exception": payload.get("exception", {}),
         "termination": payload.get("termination", {}),
-        "faulting_thread": payload.get("faultingThread"),
+        "faulting_thread": payload.get("faulting_thread"),
         "is_simulated": payload.get("isSimulated"),
         "is_non_fatal": payload.get("isNonFatal"),
         "asi": payload.get("asi", []),
