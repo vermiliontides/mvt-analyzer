@@ -26,7 +26,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+_EXTRACTORS_DIR = Path(__file__).resolve().parent.parent
+_REPO_ROOT = _EXTRACTORS_DIR.parent
+sys.path.insert(0, str(_EXTRACTORS_DIR))               # db_writer.py lives here
+sys.path.insert(0, str(_REPO_ROOT / "contracts"))       # normalized_record.py lives here
 from db_writer import ingest_file, write_record  # noqa: E402
 from normalized_record import NormalizedRecord, SourceType  # noqa: E402
 
@@ -107,7 +110,7 @@ def extract_rich_telemetry(data: dict) -> dict:
         "time_awake_since_boot": payload.get("timeAwakeSinceBoot"),
         "exception": payload.get("exception", {}),
         "termination": payload.get("termination", {}),
-        "faulting_thread": payload.get("faulting_thread"),
+        "faulting_thread": payload.get("faultingThread"),
         "is_simulated": payload.get("isSimulated"),
         "is_non_fatal": payload.get("isNonFatal"),
         "asi": payload.get("asi", []),

@@ -28,43 +28,43 @@ MOCK_CHUNK = """[
 
 def run_benchmark():
     print("Starting Forensics Benchmark (Speed & Accuracy)...\n")
-    
+
     for model in MODELS:
         print(f"========================================")
         print(f"🧪 Testing Model: {model}")
         print(f"========================================")
-        
+
         # Wake/Load the model into VRAM first so we don't benchmark disk-read time
         requests.post(OLLAMA_URL, json={"model": model, "prompt": "wake up", "stream": False})
-        
+
         prompt = f"DATABASE SCHEMA FIELDS FOR REFERENCE: {SCHEMA_KEYS}\n\n{SYSTEM_PROMPT}\n\nLOG DATA CHUNK:\n{MOCK_CHUNK}"
         payload = {"model": model, "prompt": prompt, "stream": False}
-        
+
         try:
             resp = requests.post(OLLAMA_URL, json=payload).json()
-            
+
             # Ollama returns timings in nanoseconds, convert to seconds
             prompt_eval_sec = resp.get("prompt_eval_duration", 1) / 1e9
             eval_sec = resp.get("eval_duration", 1) / 1e9
-            
+
             # Calculate Tokens Per Second (TPS)
             prompt_tps = resp.get("prompt_eval_count", 0) / prompt_eval_sec if prompt_eval_sec > 0 else 0
             gen_tps = resp.get("eval_count", 0) / eval_sec if eval_sec > 0 else 0
-            
+
             result_text = resp.get("response", "").strip()
-            
+
             # Grade Formatting: Did it leak the markdown headers?
             has_headers = "timestamp" in result_text.lower() and "risk level" in result_text.lower()
-            
+
             # Grade Accuracy: Did it catch the synthetic threat?
             caught_anomaly = "pwned" in result_text.lower() or "103.45.67.89" in result_text
-            
+
             print(f"🚀 Prompt Processing (Input):  {prompt_tps:.1f} tokens/sec")
             print(f"⚡ Generation Speed (Output): {gen_tps:.1f} tokens/sec")
             print(f"✅ Format Compliant:          {'No (Failed negative constraints)' if has_headers else 'Yes'}")
             print(f"🎯 Caught the Anomaly:        {'Yes' if caught_anomaly else 'No (Missed Threat)'}")
             print(f"\nRaw Model Output:\n{result_text}\n")
-            
+
         except Exception as e:
             print(f"Failed to test {model}: Is it installed? Error: {e}\n")
 

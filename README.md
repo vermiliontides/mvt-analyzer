@@ -78,3 +78,27 @@ DATABASE_URL=postgresql://forensics:forensics_dev_only@localhost:5432/forensics 
 # ...or against specific decrypted-backup directories directly:
 DATABASE_URL=postgresql://forensics:forensics_dev_only@localhost:5432/forensics \
   pnpm run investigate /path/to/decrypted/backup-a /path/to/decrypted/backup-b
+```
+
+Re-running `pnpm run investigate --workspace ...` after new backups have
+been decrypted only processes what's new — a backup with a prior
+fully-succeeded run (no failed stages) is skipped automatically.
+
+## Adding a new extractor
+
+See [`contracts/EXTRACTOR_CONTRACT.md`](contracts/EXTRACTOR_CONTRACT.md)
+for the full process-level contract (invocation, exit codes, idempotency,
+output shape, failure handling). Short version: any language is fine as
+long as it satisfies that contract and validates every record it writes
+against the shared `NormalizedRecord` schema
+(`contracts/normalized-record.schema.json`).
+
+## Status
+
+| Domain | Extractor status |
+| :--- | :--- |
+| Crash telemetry (`.ips`) | Migrating from standalone script — see `extractors/crash/README.md` |
+| Safari history | Not yet built — design notes in `extractors/safari/README.md` |
+| SMS | Not yet built — design notes in `extractors/sms/README.md` |
+| Network usage | Not yet built — design notes in `extractors/network/README.md` |
+| gcloud logs | Not yet built — design notes in `extractors/gcloud/README.md` |

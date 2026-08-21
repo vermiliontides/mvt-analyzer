@@ -1,15 +1,36 @@
-##!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 automated_forensics.py
 
 LLM-assisted triage over MVT check-backup output, plus differential
 tamper-detection across two backup snapshots.
 
-Features:
-  - Per-chunk checkpointing in SQLite with schema auto-migration.
-  - Full model provenance tracking per chunk.
-  - Thread-safe HTTP request pool with single-threaded SQLite writes.
-  - Command-line control over model selection, concurrency, and re-modeling.
+Checkpointing is per-CHUNK (not per-file) in SQLite, so:
+  - Resuming after an interruption only re-does chunks that never completed
+    successfully (status 'pending' or 'failed') — chunks already marked
+    'safe' or 'flagged' are never re-analyzed.
+  - A file is only considered complete when every one of its chunks reached
+    a terminal, non-failed state. A run where every chunk failed (e.g.
+    Ollama was down) leaves the file incomplete and eligible for resume,
+    instead of being silently marked done.
+  - Failures are bounded-retried per chunk, not infinitely re-attempted and
+    not silently swallowed into the results.
+
+Each chunk also records which model produced its result (model_name).
+This matters because a chunk's "safe"/"flagged" verdict is a judgment
+call, not a deterministic fact — switching the analysis model mid-project
+without tracking that would silently produce a report with unlabeled,
+inconsistent-provenance findings. See stale_model_chunk_counts /
+reset_stale_model_chunks / --remodel below for how that's surfaced and
+fixed, rather than papered over.
+
+Chunk analysis runs concurrently (--max-concurrent) via a thread pool, but
+deliberately keeps all SQLite writes on the single main-thread connection:
+worker threads only ever do the network round-trip to Ollama (query_local_llm),
+and record_chunk_result is only ever called from the main thread's
+as_completed() loop in process_file(). sqlite3 connections aren't safe to
+share across threads, so this split — not a connection-per-thread scheme —
+is what makes concurrency safe here without adding locking.
 """
 
 import argparse
@@ -18,6 +39,7 @@ import logging
 import os
 import sqlite3
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, UTC
 
@@ -27,7 +49,7 @@ import requests
 # DEFAULT CONFIGURATION
 # ----------------------------------------------------------------------------
 OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_TAGS_URL = "http://localhost:11434/api/tags"
+OLLAMA_TAGS_URL = "http://localhost:11434/api/tags"  # cheap connectivity check
 
 # Default tuned for 6GB VRAM GPUs (GTX 1060 / 1660 Ti / RTX 3060 Laptop)
 DEFAULT_MODEL_NAME = "llama3:8b-instruct-q4_K_M"
@@ -40,6 +62,11 @@ CHECKPOINT_DB_PATH = "forensic_checkpoint.sqlite3"
 LOG_PATH = "automated_forensics.log"
 
 MAX_ATTEMPTS_PER_CHUNK = 3
+RETRY_BACKOFF_SECONDS = 5  # paced sleep on failure, so a struggling/restarting
+                            # Ollama isn't hammered by concurrent workers all
+                            # retrying at once — safe to sleep here since it
+                            # runs inside a worker thread, not the main thread
+                            # that owns the single SQLite connection.
 
 SYSTEM_PROMPT = (
     "You are an expert iOS digital forensics analyst. Analyze this small chunk of MVT JSON logs.\n"
@@ -98,6 +125,10 @@ def init_checkpoint_db(db_path: str = CHECKPOINT_DB_PATH) -> sqlite3.Connection:
         )
         """
     )
+    # Auto-migrate: model_name was added after chunk_status already existed
+    # in the wild. Checking for it and ALTERing in-place means an existing
+    # checkpoint DB from before this feature keeps working without a manual
+    # migration step or losing prior progress.
     existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(chunk_status)").fetchall()}
     if "model_name" not in existing_cols:
         conn.execute("ALTER TABLE chunk_status ADD COLUMN model_name TEXT")
@@ -106,6 +137,8 @@ def init_checkpoint_db(db_path: str = CHECKPOINT_DB_PATH) -> sqlite3.Connection:
     return conn
 
 def ensure_chunks_registered(conn: sqlite3.Connection, file_name: str, total_chunks: int) -> None:
+    """Idempotently registers every chunk index for a file as 'pending' if not already tracked.
+    Never overwrites an existing row — this is what preserves already-successful chunks across runs."""
     now = datetime.now(UTC).isoformat()
     for idx in range(total_chunks):
         conn.execute(
@@ -119,6 +152,7 @@ def ensure_chunks_registered(conn: sqlite3.Connection, file_name: str, total_chu
     conn.commit()
 
 def get_outstanding_chunks(conn: sqlite3.Connection, file_name: str) -> list[int]:
+    """Chunks that still need work: never attempted, or failed and under the retry cap."""
     cur = conn.execute(
         """
         SELECT chunk_index FROM chunk_status
@@ -140,6 +174,10 @@ def record_chunk_result(
     result_rows: list[str] | None = None,
     error_message: str | None = None,
 ) -> None:
+    """Records a terminal (or failed) outcome for one chunk, including which
+    model produced it — the provenance record that makes stale_model_chunk_counts
+    and --remodel possible. Only ever called from the main thread; see the
+    module docstring for why that matters with concurrent chunk processing."""
     now = datetime.now(UTC).isoformat()
     conn.execute(
         """
@@ -154,6 +192,11 @@ def record_chunk_result(
     conn.commit()
 
 def stale_model_chunk_counts(conn: sqlite3.Connection, current_model: str) -> list[tuple[str | None, int]]:
+    """Counts already-completed ('safe'/'flagged') chunks whose recorded
+    model_name doesn't match the model this run is about to use — i.e.
+    findings that would silently mix provenance with new results if left
+    alone. Read-only; reset_stale_model_chunks is the companion that acts
+    on this."""
     cur = conn.execute(
         """
         SELECT model_name, COUNT(*) FROM chunk_status
@@ -165,6 +208,11 @@ def stale_model_chunk_counts(conn: sqlite3.Connection, current_model: str) -> li
     return cur.fetchall()
 
 def reset_stale_model_chunks(conn: sqlite3.Connection, current_model: str) -> int:
+    """Requeues every stale-model chunk (see stale_model_chunk_counts) back
+    to 'pending' with a clean attempt counter, so the next run re-analyzes
+    them under current_model instead of leaving mixed-provenance results in
+    the report. Only invoked when --remodel is explicitly passed — this is
+    a destructive reset of prior findings, never automatic."""
     now = datetime.now(UTC).isoformat()
     cur = conn.execute(
         """
@@ -178,6 +226,9 @@ def reset_stale_model_chunks(conn: sqlite3.Connection, current_model: str) -> in
     return cur.rowcount
 
 def models_used_for_file(conn: sqlite3.Connection, file_name: str) -> list[str]:
+    """Distinct models whose results are currently backing this file's
+    completed chunks — surfaced in the report so a mixed-provenance file is
+    visible to a reader, not just to someone querying the checkpoint DB."""
     cur = conn.execute(
         """
         SELECT DISTINCT model_name FROM chunk_status
@@ -193,10 +244,10 @@ def file_completion_summary(conn: sqlite3.Connection, file_name: str) -> dict:
     counts = {status: count for status, count in cur.fetchall()}
     total = sum(counts.values())
     terminal = counts.get("safe", 0) + counts.get("flagged", 0)
-    
+
     cur = conn.execute("SELECT COUNT(*) FROM chunk_status WHERE file_name = ? AND status = 'failed' AND attempts >= ?", (file_name, MAX_ATTEMPTS_PER_CHUNK))
     exhausted_failures = cur.fetchone()[0]
-    
+
     return {
         "total": total,
         "safe": counts.get("safe", 0),
@@ -227,12 +278,13 @@ def collect_flagged_rows(conn: sqlite3.Connection, file_name: str) -> list[str]:
 
 def get_chunk_size(filename: str) -> int:
     if "datausage" in filename or "interaction_c" in filename:
-        return 60
+        return 60  # Dropped slightly to guarantee stability over long runs
     if "safari" in filename or "sms" in filename:
         return 90
     return 130
 
 def extract_schema_keys(file_path: str) -> list[str]:
+    """Safely extracts the top-level keys of the JSON file to provide context to the LLM."""
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -254,12 +306,18 @@ def chunk_log_file(file_path: str, chunk_size: int) -> list[str]:
             lines = f.readlines()
     return ["\n".join(lines[i : i + chunk_size]) for i in range(0, len(lines), chunk_size)]
 
+# ----------------------------------------------------------------------------
+# JUNK ROW FILTERING (fixes header/separator leakage into results)
+# ----------------------------------------------------------------------------
+
 def is_junk_row(row: str) -> bool:
+    """Detects markdown table headers and separator rows the model produced
+    despite being told not to, so they never make it into stored results."""
     lowered = row.lower()
     if "timestamp" in lowered and "risk level" in lowered:
-        return True
+        return True  # header row
     stripped = row.replace("|", "").replace("-", "").replace(" ", "").replace(":", "")
-    return stripped == ""
+    return stripped == ""  # separator row, e.g. "| :--- | :--- |"
 
 # ----------------------------------------------------------------------------
 # OLLAMA API INTERACTION
@@ -275,6 +333,11 @@ def check_ollama_reachable() -> tuple[bool, str]:
         return False, str(e)
 
 def query_local_llm(log_chunk: str, schema_keys: list[str], model_name: str) -> tuple[bool, list[str], str | None]:
+    """Returns (ok, clean_rows, error_message). ok=True and empty rows means
+    the model reported SAFE for this chunk — that's a real, storable result,
+    distinct from a failed request. Runs inside a worker thread (see
+    process_file) — the retry sleeps below are safe here specifically
+    because this function never touches the shared SQLite connection."""
     context_prompt = f"DATABASE SCHEMA FIELDS FOR REFERENCE: {schema_keys}\n\n{SYSTEM_PROMPT}\n\nLOG DATA CHUNK:\n{log_chunk}"
     payload = {"model": model_name, "prompt": context_prompt, "stream": False}
     try:
@@ -282,9 +345,11 @@ def query_local_llm(log_chunk: str, schema_keys: list[str], model_name: str) -> 
         response.raise_for_status()
         result = response.json().get("response", "").strip()
     except Exception as e:
+        time.sleep(RETRY_BACKOFF_SECONDS)
         return False, [], str(e)
 
     if not result:
+        time.sleep(RETRY_BACKOFF_SECONDS)
         return False, [], "empty response from model"
 
     if result.strip().upper() == "SAFE":
@@ -295,7 +360,7 @@ def query_local_llm(log_chunk: str, schema_keys: list[str], model_name: str) -> 
     return True, clean_rows, None
 
 # ----------------------------------------------------------------------------
-# DIFFERENTIAL ANALYSIS & REPORTING
+# DIFFERENTIAL ANALYSIS & REPORTING (unchanged in spirit, not chunked, cheap to redo)
 # ----------------------------------------------------------------------------
 
 def run_differential_analysis() -> list[str]:
@@ -326,13 +391,14 @@ def write_final_report(conn: sqlite3.Connection, differential_alerts: list[str],
         repo.write(f"**Primary Baseline:** `{DIR_MAY28}`  \n")
         repo.write(f"**Comparative Target:** `{DIR_JUNE01}`  \n\n")
 
+        # --- Honesty section: what's actually complete vs. outstanding ---
         repo.write("## Analysis Completeness\n\n")
         repo.write("| Source File | Total Chunks | Safe | Flagged | Failed | Pending | Model(s) | Status |\n")
         repo.write("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n")
-        
+
         any_incomplete = False
         any_mixed_model = False
-        
+
         for fname in all_files:
             s = file_completion_summary(conn, fname)
             status = "complete" if s["complete"] else "INCOMPLETE — re-run to finish"
@@ -344,10 +410,15 @@ def write_final_report(conn: sqlite3.Connection, differential_alerts: list[str],
                 models_display = f"⚠️ MIXED: {models_display}"
                 any_mixed_model = True
             repo.write(f"| `{fname}` | {s['total']} | {s['safe']} | {s['flagged']} | {s['failed']} | {s['pending']} | {models_display} | {status} |\n")
-        
+
         repo.write("\n")
         if any_incomplete:
-            repo.write("> ⚠️ One or more files have incomplete chunks. Findings below reflect only completed chunks.\n\n")
+            repo.write(
+                "> ⚠️ One or more files have chunks that failed or never ran. Findings below reflect only "
+                "the chunks that completed successfully — **this report is not yet a complete picture**. "
+                "Re-run the script to retry outstanding chunks; already-completed chunks will not be "
+                "re-analyzed.\n\n"
+            )
         if any_mixed_model:
             repo.write("> ⚠️ Results contain findings from multiple model versions. Run with `--remodel` to unify.\n\n")
 
@@ -383,6 +454,11 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 def process_file(conn: sqlite3.Connection, filename: str, chunks: list[str], schema_keys: list[str], outstanding: list[int], model_name: str, max_concurrent: int) -> None:
+    """Dispatches every outstanding chunk to a thread pool for the Ollama
+    round-trip, then records each result back on the SQLite connection from
+    this (main) thread as futures complete. The worker threads (_run) never
+    touch `conn` — that split is what keeps this safe with max_concurrent > 1
+    without any locking. See the module docstring for the full rationale."""
     def _run(chunk_index: int) -> tuple[int, bool, list[str], str | None]:
         ok, rows, error = query_local_llm(chunks[chunk_index], schema_keys, model_name)
         return chunk_index, ok, rows, error
@@ -417,11 +493,19 @@ def main() -> None:
 
     log.info("Phase 1: Gathering differential statistics")
     differential_alerts = run_differential_analysis()
+    if differential_alerts:
+        log.warning(f"{len(differential_alerts)} differential alert(s) found")
 
     reachable, reason = check_ollama_reachable()
     if not reachable:
-        log.error(f"Ollama connection check failed: {reason}")
+        log.error(
+            f"Ollama is not reachable at {OLLAMA_TAGS_URL} ({reason}). "
+            f"Aborting before processing any chunks — nothing will be checkpointed as failed "
+            f"just because Ollama is down. Start Ollama and re-run; already-completed chunks "
+            f"from prior runs are unaffected."
+        )
         sys.exit(1)
+    log.info("Ollama connectivity check passed")
 
     if not os.path.exists(DIR_MAY28):
         log.error(f"Baseline directory missing: {DIR_MAY28}")
@@ -442,15 +526,48 @@ def main() -> None:
 
         if not outstanding:
             if summary["complete"]:
-                log.info(f"{filename}: Complete ({summary['total']} chunks) — skipping")
+                log.info(f"{filename}: already complete ({summary['total']} chunks) — skipping")
+            else:
+                log.warning(
+                    f"{filename}: {summary['exhausted_failures']} chunk(s) exhausted retries "
+                    f"({MAX_ATTEMPTS_PER_CHUNK} attempts) and remain failed — not retrying further "
+                    f"automatically. See {LOG_PATH} for error details."
+                )
             continue
 
-        log.info(f"{filename}: Processing {len(outstanding)}/{len(chunks)} outstanding chunks...")
+        log.info(
+            f"{filename}: {len(outstanding)} chunk(s) outstanding of {len(chunks)} total "
+            f"(safe={summary['safe']} flagged={summary['flagged']} failed={summary['failed']})"
+        )
         process_file(conn, filename, chunks, schema_keys, outstanding, args.model, args.max_concurrent)
+        # Report is rewritten after every file so progress is never lost,
+        # and it always reflects true per-chunk completeness, not a guess.
         write_final_report(conn, differential_alerts, all_json_files)
 
     log.info("Phase 3: Finalizing forensic report")
     write_final_report(conn, differential_alerts, all_json_files)
+
+    # --- Run summary ---
+    log.info("=" * 60)
+    log.info("Run summary:")
+    incomplete_files = []
+    for fname in all_json_files:
+        s = file_completion_summary(conn, fname)
+        if not s["complete"]:
+            incomplete_files.append((fname, s))
+    if incomplete_files:
+        log.warning(f"{len(incomplete_files)} file(s) incomplete — re-run this script to continue:")
+        for fname, s in incomplete_files:
+            log.warning(
+                f"  {fname}: {s['pending']} pending, {s['failed']} failed "
+                f"({s['exhausted_failures']} exhausted retries)"
+            )
+    else:
+        log.info("All files fully analyzed.")
+    log.info(f"Report: {FINAL_REPORT_PATH}")
+    log.info(f"Checkpoint DB: {CHECKPOINT_DB_PATH} (safe to inspect with sqlite3 directly)")
+    log.info("=" * 60)
+
     conn.close()
 
 if __name__ == "__main__":

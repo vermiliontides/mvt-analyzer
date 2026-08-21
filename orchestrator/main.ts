@@ -54,6 +54,30 @@ interface RunConfig {
   dbUrl: string;
 }
 
+/**
+ * True if `backupPath` already has a pipeline_runs row that both finished
+ * and had zero failed stages. Stage-level failures deliberately do NOT
+ * count as "succeeded" here — a fixed extractor should get a chance to
+ * fill in a previously-failed stage on re-run, so only a clean run is
+ * skippable. This is what keeps a --workspace re-run cheap once a backlog
+ * of backups has mostly been processed, without silently leaving gaps.
+ */
+async function hasSucceededRun(client: Client, backupPath: string): Promise<boolean> {
+  const { rows } = await client.query(
+    `SELECT pr.run_id
+     FROM pipeline_runs pr
+     WHERE pr.backup_source = $1
+       AND pr.finished_at IS NOT NULL
+       AND NOT EXISTS (
+         SELECT 1 FROM pipeline_stage_status pss
+         WHERE pss.run_id = pr.run_id AND pss.status = 'failed'
+       )
+     LIMIT 1`,
+    [backupPath]
+  );
+  return rows.length > 0;
+}
+
 async function createRun(client: Client, backupPath: string): Promise<string> {
   const runId = randomUUID();
   await client.query(
@@ -158,12 +182,31 @@ async function parseCliConfig(): Promise<CliConfig> {
       console.error(`[orchestrator] has mvt-runner been run against this workspace yet?`);
       process.exit(1);
     }
-    const backupPaths = entries
-      .filter((e) => e.isDirectory())
-      .map((e) => path.join(decryptedDir, e.name))
-      .sort();
+    // Only queue backups mvt-runner actually finished decrypting. repair/check
+    // have their own separate markers and are best-effort — decrypt succeeding
+    // is the one precondition this pipeline actually needs.
+    const candidates = entries.filter((e) => e.isDirectory());
+    const backupPaths: string[] = [];
+    const skippedIncomplete: string[] = [];
+    for (const entry of candidates) {
+      const dir = path.join(decryptedDir, entry.name);
+      const markerExists = await fsp
+        .access(path.join(dir, ".mvt_decrypted_ok"))
+        .then(() => true)
+        .catch(() => false);
+      if (markerExists) {
+        backupPaths.push(dir);
+      } else {
+        skippedIncomplete.push(dir);
+      }
+    }
+    backupPaths.sort();
+    if (skippedIncomplete.length > 0) {
+      console.log(`[orchestrator] skipping ${skippedIncomplete.length} incomplete decrypt(s) (no .mvt_decrypted_ok):`);
+      for (const dir of skippedIncomplete) console.log(`  - ${dir}`);
+    }
     if (backupPaths.length === 0) {
-      console.error(`[orchestrator] no decrypted backups found under ${decryptedDir}`);
+      console.error(`[orchestrator] no fully-decrypted backups found under ${decryptedDir}`);
       process.exit(1);
     }
     return { backupPaths, dbUrl };
@@ -223,9 +266,14 @@ async function main() {
 
   console.log(`[orchestrator] processing ${cfg.backupPaths.length} backup(s)`);
 
-  const summary: { backupPath: string; runId?: string; failedStages: string[]; error?: string }[] = [];
+  const summary: { backupPath: string; runId?: string; failedStages: string[]; error?: string; skipped?: boolean }[] = [];
 
   for (const backupPath of cfg.backupPaths) {
+    if (await hasSucceededRun(client, backupPath)) {
+      console.log(`\n[orchestrator] ===== ${backupPath} ===== (skipped — already fully succeeded)`);
+      summary.push({ backupPath, failedStages: [], skipped: true });
+      continue;
+    }
     console.log(`\n[orchestrator] ===== ${backupPath} =====`);
     try {
       const { runId, results } = await runPipelineForBackup(client, backupPath, dbUrl);
@@ -246,7 +294,9 @@ async function main() {
 
   console.log("\n[orchestrator] all backups processed");
   for (const s of summary) {
-    if (s.error) {
+    if (s.skipped) {
+      console.log(`  ${s.backupPath}: skipped — already fully succeeded`);
+    } else if (s.error) {
       console.log(`  ${s.backupPath}: FAILED before stages ran — ${s.error}`);
     } else if (s.failedStages.length === 0) {
       console.log(`  ${s.backupPath}: run ${s.runId} — all stages succeeded`);

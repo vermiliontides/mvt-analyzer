@@ -31,7 +31,7 @@ from typing import Any
 import psycopg2
 import psycopg2.extras
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent / "contracts"))
 from normalized_record import NormalizedRecord  # noqa: E402
 
 
