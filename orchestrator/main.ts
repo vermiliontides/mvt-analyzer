@@ -20,6 +20,18 @@
  * single --backup-path. It now accepts N backups and runs a full,
  * independent pipeline against each — one failing backup (or one failing
  * stage within a backup) never blocks the others.
+ *
+ * --results-path note: every stage is now also given a best-effort
+ * --results-path (<workspace>/results/<name>/, mvt-runner's sibling
+ * directory to decrypted/<name>/), derived from --backup-path. This is a
+ * no-op for extractors that don't need it (safari/sms/network parse the
+ * decrypted backup, not mvt-ios's output — see EXTRACTOR_CONTRACT.md's
+ * Option A rationale) and required for extractors/mvt_iocs, which reads
+ * mvt-ios's own alerts.json/timeline.csv as primary evidence. If a
+ * results/ dir can't be derived (e.g. an explicit non-workspace backup
+ * path with no 'decrypted' segment), it's simply omitted — extractors
+ * that need it fail with their own clear error rather than the
+ * orchestrator guessing.
  */
 
 import { spawn } from "node:child_process";
@@ -31,7 +43,7 @@ import * as path from "node:path";
 
 interface StageDefinition {
   name: string;
-  /** Executable + args to invoke this stage. Extends with --run-id/--backup-path/--db-url at call time. */
+  /** Executable + args to invoke this stage. Extends with --run-id/--backup-path/--results-path/--db-url at call time. */
   command: string;
   args: string[];
 }
@@ -46,12 +58,30 @@ const STAGES: StageDefinition[] = [
   { name: "sms", command: "python3", args: ["../extractors/sms/main.py"] },
   { name: "network", command: "python3", args: ["../extractors/network/main.py"] },
   { name: "gcloud", command: "python3", args: ["../extractors/gcloud/main.py"] },
+  { name: "mvt_iocs", command: "python3", args: ["../extractors/mvt_iocs/main.py"] },
   { name: "report", command: "python3", args: ["../reporting/generate_report.py"] },
 ];
 
 interface RunConfig {
   backupPath: string;
+  resultsPath?: string;
   dbUrl: string;
+}
+
+/**
+ * Derives <workspace>/results/<name>/ from <workspace>/decrypted/<name>/
+ * by swapping the one path segment mvt-runner's fixed layout guarantees
+ * differs between the two. Mirrors extractors/mvt_iocs/main.py's own
+ * fallback logic exactly, so the two stay in sync — this is best-effort
+ * plumbing, not validation; a stage that actually needs the directory to
+ * exist checks that itself.
+ */
+function deriveResultsPath(backupPath: string): string | undefined {
+  const parts = backupPath.split(path.sep);
+  const idx = parts.indexOf("decrypted");
+  if (idx === -1) return undefined;
+  parts[idx] = "results";
+  return parts.join(path.sep);
 }
 
 /**
@@ -121,11 +151,13 @@ function runStage(
   runId: string
 ): Promise<{ success: boolean; stderr: string }> {
   return new Promise((resolve) => {
-    const child = spawn(
-      stage.command,
-      [...stage.args, "--run-id", runId, "--backup-path", config.backupPath, "--db-url", config.dbUrl],
-      { stdio: ["ignore", "pipe", "pipe"] }
-    );
+    const extraArgs = ["--run-id", runId, "--backup-path", config.backupPath, "--db-url", config.dbUrl];
+    if (config.resultsPath) {
+      extraArgs.push("--results-path", config.resultsPath);
+    }
+    const child = spawn(stage.command, [...stage.args, ...extraArgs], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
 
     let stderr = "";
     child.stderr?.on("data", (chunk) => {
@@ -231,7 +263,11 @@ async function runPipelineForBackup(
   dbUrl: string
 ): Promise<{ runId: string; results: { stage: string; success: boolean }[] }> {
   const runId = await createRun(client, backupPath);
+  const resultsPath = deriveResultsPath(backupPath);
   console.log(`[orchestrator] run ${runId} started against ${backupPath}`);
+  if (resultsPath) {
+    console.log(`[orchestrator]   (results dir: ${resultsPath})`);
+  }
 
   const results: { stage: string; success: boolean }[] = [];
 
@@ -239,7 +275,7 @@ async function runPipelineForBackup(
     console.log(`[orchestrator] -> ${stage.name}`);
     await markStage(client, runId, stage.name, "running");
 
-    const { success, stderr } = await runStage(stage, { backupPath, dbUrl }, runId);
+    const { success, stderr } = await runStage(stage, { backupPath, resultsPath, dbUrl }, runId);
 
     if (success) {
       await markStage(client, runId, stage.name, "succeeded");

@@ -32,6 +32,12 @@ class SourceType(str, Enum):
     NETWORK_USAGE = "network_usage"
     GCLOUD_LOG = "gcloud_log"
     SYSLOG_LINE = "syslog_line"
+    # mvt_iocs extractor (extractors/mvt_iocs/) — see its README for the
+    # "these are already analysis output, not raw evidence" rationale for
+    # why this extractor consumes mvt-ios's own JSON/CSV directly instead
+    # of re-deriving from a raw DB, unlike safari/sms/network.
+    MVT_IOC_DETECTION = "mvt_ioc_detection"
+    TIMESTAMP_ANOMALY = "timestamp_anomaly"
 
 
 class NormalizedRecord(BaseModel):

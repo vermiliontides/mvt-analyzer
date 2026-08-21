@@ -22,6 +22,8 @@ export const SourceType = z.enum([
   "network_usage",
   "gcloud_log",
   "syslog_line",
+  "mvt_ioc_detection",
+  "timestamp_anomaly",
 ]);
 export type SourceType = z.infer<typeof SourceType>;
 

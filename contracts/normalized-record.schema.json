@@ -22,7 +22,9 @@
         "sms_attachment",
         "network_usage",
         "gcloud_log",
-        "syslog_line"
+        "syslog_line",
+        "mvt_ioc_detection",
+        "timestamp_anomaly"
       ]
     },
     "event_time": {

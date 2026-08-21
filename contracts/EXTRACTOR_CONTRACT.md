@@ -11,7 +11,7 @@ new source additive instead of a change to `orchestrator/main.ts`.
 The orchestrator runs each extractor as a subprocess:
 
 ```
-<extractor-entrypoint> --run-id <uuid> --backup-path <path> --db-url <postgres-url>
+<extractor-entrypoint> --run-id <uuid> --backup-path <path> --db-url <postgres-url> [--results-path <path>]
 ```
 
 - `--run-id` — the `pipeline_runs.run_id` for this invocation. Every row the
@@ -22,6 +22,17 @@ The orchestrator runs each extractor as a subprocess:
   document your extractor's expected input shape in its own README).
 - `--db-url` — Postgres connection string. Extractors write directly; there
   is no intermediate queue or API for the current scale of this pipeline.
+- `--results-path` — **optional**, `mvt-ios check-backup`'s output
+  directory (`<workspace>/results/<name>/`, the sibling of
+  `<workspace>/decrypted/<name>/`). The orchestrator derives and passes
+  this best-effort for every stage; extractors that only need the
+  decrypted backup (safari, sms, network — see §Option A note below)
+  ignore it. Extractors that consume mvt-ios's own analysis output as
+  primary evidence rather than re-parsing a raw artifact (currently just
+  `extractors/mvt_iocs/`) require it, and should derive a sensible
+  fallback from `--backup-path` and fail with a clear message if neither
+  is usable — see `extractors/mvt_iocs/main.py`'s `resolve_results_path`
+  for the reference implementation.
 
 ## 2. Exit codes
 
@@ -56,7 +67,12 @@ Every row written to `forensic_records` must be constructible as a
   top-level contract intentionally doesn't validate inside it.
 - Always also write the untouched original payload to
   `ingested_files.raw_payload` — normalization is lossy by design, raw
-  retention is what keeps that acceptable.
+  retention is what keeps that acceptable. (For a source file large enough
+  that a full dump is impractical rather than merely inconvenient — e.g.
+  `extractors/mvt_iocs/`'s `timeline.csv` input, which can run past 250k
+  rows — a documented, justified deviation to summary metadata is
+  acceptable; see that extractor's README for the reasoning and what it
+  preserves instead.)
 - The back-reference from a `forensic_records` row to its source file is
   `forensic_records.file_hash` (an enforced FK to `ingested_files`), passed
   explicitly as an argument to `write_record`/`write_records` — it is not,
@@ -83,6 +99,10 @@ Failure is expected and must be recoverable, not fatal:
 - Re-running your extractor after a fix should pick up where it left off,
   not require a clean slate — this falls out of the idempotency
   requirement in #3.
+- A stage that depends on more than one input file (e.g. `mvt_iocs`
+  reading both `alerts.json` and `timeline.csv`) should process each
+  input independently — one missing/malformed file shouldn't block
+  output from the other.
 
 ## 6. Adding a new source_type
 
