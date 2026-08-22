@@ -24,6 +24,7 @@ export const SourceType = z.enum([
   "syslog_line",
   "mvt_ioc_detection",
   "timestamp_anomaly",
+  "ileapp_record",
 ]);
 export type SourceType = z.infer<typeof SourceType>;
 
