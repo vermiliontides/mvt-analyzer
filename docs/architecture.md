@@ -89,7 +89,7 @@ The correct references today are:
 - `packages-ts/orchestrator/mvt-runner` for the decrypt/workspace wrapper
 - `packages-py/db/migrate.py` for migration entrypoints
 - `reporting/generate_report.py` for report rendering
-- `packages-ts/contracts` and `packages-py/contracts` for shared schema files
+- `contracts/` for the canonical shared schema and documentation; see `packages-ts/contracts-adapter` and `packages-py/contracts_adapter` for language-native helpers
 
 The architecture itself remains compatible with the original design intent;
 what changed is the package layout and the exact execution paths.
