@@ -1,25 +1,28 @@
 # Runbook: running the pipeline end to end
 
-One-time setup, then the four commands you'll actually run repeatedly.
-Every step here is idempotent — re-running any of them after a fix only
-redoes the part that failed.
+This project is currently organized as a mixed workspace, so the operational
+sequence is slightly different from the older monolithic path names. The live
+layout is:
+
+- `infra/` for Postgres
+- `packages-ts/orchestrator/mvt-runner` for the mvt-ios wrapper
+- `packages-ts/orchestrator/main-orchestrator` for the orchestration CLI
+- `packages-py/db/migrate.py` for DB migrations
+- `reporting/generate_report.py` for report rendering
+
+The logic is the same as the architecture describes: decrypt backups,
+normalize them into a shared contract, run extractor stages, and render an
+honest report that shows what succeeded and what failed.
 
 ## One-time setup
 
 ```bash
 git clone https://github.com/vermiliontides/mvt-analyzer.git
 cd mvt-analyzer
-
-cd orchestrator && pnpm install && cd ..      # or npm/yarn
-cd mvt-runner && npm install && npm run build && cd ..
-pip install psycopg2-binary pydantic --break-system-packages   # for extractors + reporting
+pnpm install
 ```
 
 ## Every time you have new backups to process
-
-Run these four in order. Each one is a separate stage of the system; none
-of them start the next one automatically except step 4, which runs all the
-extractors + the report as its own last internal stage.
 
 ### 1. Start Postgres
 
@@ -28,86 +31,76 @@ cd infra && docker compose up -d
 cd ..
 ```
 
-First boot of the `forensics_pgdata` volume auto-applies
-`db/migrations/0001_init.sql` via `docker-entrypoint-initdb.d`. That hook
-never fires again after the first boot.
-
-### 2. Apply any migrations newer than 0001
+### 2. Apply migrations
 
 ```bash
-python3 db/migrate.py --db-url postgresql://forensics:forensics_dev_only@localhost:5432/forensics
+python3 packages-py/db/migrate.py --db-url postgresql://localhost:5432/forensics
 ```
 
-Safe to run every time, including the very first time (it detects
-migrations the docker hook already applied and doesn't double-apply them).
-Prints `up to date, nothing to apply` when there's nothing to do.
+This is safe to run repeatedly; it is idempotent and will report when nothing
+new needs to be applied.
 
-### 3. Decrypt backups with mvt-runner
+### 3. Decrypt backups with the mvt-runner helper
 
 ```bash
-cd mvt-runner
+cd packages-ts/orchestrator/mvt-runner
+npm install
+npm run build
 node dist/main.js --source ~/iPhone-Backups --workspace ~/mvt-workspace
-cd ..
+cd ../../..
 ```
 
-- `--source` — directory containing your raw `idevicebackup2` backup
-  folders (one subfolder per backup)
-- `--workspace` — where decrypted output, results, hashes, and logs go
-- Prompts once for a password and reuses it across all backups by default;
-  pass `--different-passwords` if they're not all the same
-- Re-running skips any backup/stage already completed. Use `--force` to
-  re-run `check-backup` only, or `--force-decrypt` to redo
-  decrypt+repair+check for that backup
+- `--source` is the directory containing the raw encrypted backup folders.
+- `--workspace` is where `mvt-runner` writes decrypted output, results, and
+  logs.
+- Re-running is intentionally incremental; already-completed work is skipped.
 
 ### 4. Run the extraction + reporting pipeline
 
 ```bash
-cd orchestrator
-DATABASE_URL=postgresql://forensics:forensics_dev_only@localhost:5432/forensics \
+cd packages-ts/orchestrator/main-orchestrator
+DATABASE_URL=postgresql://localhost:5432/forensics \
   pnpm run investigate --workspace ~/mvt-workspace
-cd ..
+cd ../../..
 ```
 
-This is the one command that runs everything downstream of decryption:
-`crash` → `safari` → `sms` → `network` → `gcloud` → `report`, once per
-backup mvt-runner decrypted under `~/mvt-workspace/decrypted/`. Extractor
-stages that fail (or don't exist yet, like `safari`/`sms`/`network`/
-`gcloud` right now) are recorded as failed and skipped over — they don't
-block `crash` or `report` from running.
+The orchestrator runs each extractor stage under the same backup run and keeps
+failing stages isolated instead of aborting the whole job. It records stage
+status, so the final report can say exactly what succeeded, what failed, and
+what was never attempted.
 
-Prefer explicit backup paths instead of a whole workspace:
+You can also target explicit decrypted backups directly:
 
 ```bash
-pnpm run investigate /path/to/decrypted/backup-a /path/to/decrypted/backup-b
+cd packages-ts/orchestrator/main-orchestrator
+DATABASE_URL=postgresql://localhost:5432/forensics \
+  pnpm run investigate /path/to/decrypted/backup-a /path/to/decrypted/backup-b
 ```
 
 ## Re-running just the report
 
-If you fixed something and only want to re-render the Markdown for a run
-you already have (no need to re-run any extractor):
+If you already have a `run_id` and only want to render the Markdown output again:
 
 ```bash
 python3 reporting/generate_report.py \
   --run-id <uuid-from-orchestrator-output> \
-  --db-url postgresql://forensics:forensics_dev_only@localhost:5432/forensics \
+  --db-url postgresql://localhost:5432/forensics \
   --output investigation_report.md
 ```
 
-The `run_id` is printed by the orchestrator at the start of each backup's
-run (`[orchestrator] run <uuid> started against ...`) and in its final
-per-backup summary.
+The `run_id` is emitted by the orchestrator and can be used to regenerate the
+report without re-running the extractors.
 
 ## Quick sanity checks
 
 ```bash
-# Is Postgres actually reachable and current?
-python3 db/migrate.py --db-url postgresql://forensics:forensics_dev_only@localhost:5432/forensics
-# -> "up to date, nothing to apply" means healthy + current
+# Is Postgres reachable and up to date?
+python3 packages-py/db/migrate.py --db-url postgresql://localhost:5432/forensics
 
-# What backups has mvt-runner decrypted so far?
+# What backups are already decrypted?
 ls ~/mvt-workspace/decrypted/
 
-# What did the last orchestrator run actually do?
-psql postgresql://forensics:forensics_dev_only@localhost:5432/forensics \
+# What runs have happened recently?
+psql postgresql://localhost:5432/forensics \
   -c "SELECT run_id, backup_source, started_at, finished_at FROM pipeline_runs ORDER BY started_at DESC LIMIT 5;"
 ```
