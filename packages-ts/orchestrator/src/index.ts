@@ -1,4 +1,5 @@
 import { spawn } from 'child_process';
+import { randomUUID } from 'crypto';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -37,7 +38,7 @@ export class IngestionOrchestrator {
       'packages-py',
       'extractors',
       'ileapp_bridge',
-      'pipeline.py'
+      'main.py'
     );
 
     // Validate environment prerequisites
@@ -48,15 +49,18 @@ export class IngestionOrchestrator {
       throw new Error(`Python pipeline script not found at: ${pipelineScript}`);
     }
 
+    const outputPath = options.outputPath || path.join(this.workspaceRoot as string, 'ileapp_raw_output');
+    const dbUrl = process.env.DATABASE_URL ?? 'postgresql://localhost:5432/forensics';
+    const runId = randomUUID();
+
     const args = [
       pipelineScript,
-      '-i', options.inputPath,
-      '-o', options.outputPath || path.join(this.workspaceRoot as string, 'ileapp_raw_output')
+      '--run-id', runId,
+      '--backup-path', options.inputPath,
+      '--db-url', options.dbPath || dbUrl,
+      '--output', outputPath
     ];
 
-    if (options.dbPath) {
-      args.push('--db', options.dbPath);
-    }
     if (options.cleanStaging) {
       args.push('--clean');
     }

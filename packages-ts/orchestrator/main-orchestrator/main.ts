@@ -54,6 +54,7 @@ interface StageDefinition {
 // bottleneck (see /docs/architecture.md for why we're not doing that yet).
 const STAGES: StageDefinition[] = [
   { name: "crash", command: "python3", args: ["../extractors/crash/main.py"] },
+  { name: "ileapp", command: "python3", args: ["../extractors/ileapp_bridge/main.py"] },
   { name: "safari", command: "python3", args: ["../extractors/safari/main.py"] },
   { name: "sms", command: "python3", args: ["../extractors/sms/main.py"] },
   { name: "network", command: "python3", args: ["../extractors/network/main.py"] },
