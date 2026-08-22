@@ -38,6 +38,7 @@ class SourceType(str, Enum):
     # of re-deriving from a raw DB, unlike safari/sms/network.
     MVT_IOC_DETECTION = "mvt_ioc_detection"
     TIMESTAMP_ANOMALY = "timestamp_anomaly"
+    ILEAPP_RECORD = "ileapp_record"
 
 
 class NormalizedRecord(BaseModel):
