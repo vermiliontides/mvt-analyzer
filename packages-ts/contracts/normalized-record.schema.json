@@ -24,7 +24,8 @@
         "gcloud_log",
         "syslog_line",
         "mvt_ioc_detection",
-        "timestamp_anomaly"
+        "timestamp_anomaly",
+        "ileapp_record"
       ]
     },
     "event_time": {
