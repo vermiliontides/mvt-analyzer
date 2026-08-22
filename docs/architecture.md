@@ -1,78 +1,108 @@
 # Architecture
 
-## The shape: shared-contract ETL, not microservices
+## The current project shape
 
-Each source domain (crash reports, Safari history, SMS, network usage,
-gcloud logs) is parsed by an independent extractor. Extractors don't call
-each other and share no runtime — the only thing they share is a **data
-contract**: every extractor normalizes its domain into the same envelope
-(`contracts/normalized-record.schema.json`) and writes to the same two
-Postgres tables (`ingested_files`, `forensic_records`).
+The repository is not a monolithic service. It is a mixed workspace that combines:
 
-This is deliberately an ETL/data-mesh pattern, not a microservices
-architecture. There's no service-to-service networking, no queue, no shared
-process to keep alive. That's the right amount of infrastructure for a
-single-investigator pipeline running against one backup at a time — adding
-service orchestration now would be solving a scaling problem this project
-doesn't have yet.
+- `epoch/` for the desktop client
+- `packages-ts/` for TypeScript orchestration, shared contracts, and the
+  `mvt-runner` helper
+- `packages-py/` for Python-based analysis and extractor/reporting logic
+- `extractors/` for project-specific entrypoints and compatibility wrappers
+- `infra/` for local infrastructure and Postgres
 
-## Why polyglot instead of one language/runtime
+This is a real-world repo layout, and the architecture reflects it:
+components are split by language and concern, but the integration boundary is
+still a single shared contract.
 
-The existing crash extractor is Python (strong ecosystem for ad hoc
-binary/JSON forensic parsing). The orchestrator is TypeScript (already
-owns MVT subprocess invocation via `spawn()`). Forcing everything into one
-runtime to get "one service" would be a rewrite for its own sake — it buys
-nothing before a demo and risks breaking working forensic logic under time
-pressure. The contract-based integration means language choice per
-extractor is a local decision, not a project-wide one: pick whatever fits
-the source format best.
+## Shared-contract ETL, not a microservice mesh
 
-## Two axes, decided independently
+Each source domain is parsed by an independent extractor. Extractors do not
+call each other at runtime and they do not share a live process. They only
+share a data contract: a normalized record shape and a Postgres-backed state
+model.
 
-**Integration** (how components share data) — via the shared normalized
-schema in Postgres. This is the only coupling that exists between
-extractors, and it's intentionally the *only* coupling.
+That makes the design a shared-contract ETL pipeline rather than a
+microservices architecture. There is no queue, no service-to-service network,
+and no long-lived process that every source must pass through. The only real
+coupling is the schema and the stage contract.
 
-**Invocation** (how components get run) — via `orchestrator/main.ts`
-spawning each extractor as a subprocess, sequentially, per
-`contracts/EXTRACTOR_CONTRACT.md`. Extractors could be parallelized later,
-or moved to containers with independent lifecycles, if the pipeline ever
-needs to run unattended/continuously (e.g. ingesting a live gcloud log
-stream rather than a static backup snapshot) — that's the trigger to
-revisit this, not a reason to build it preemptively.
+This is the right tradeoff for an investigation workload with a single user,
+a single backup at a time, and a strong need for honest failure reporting.
+
+## Why polyglot is intentional
+
+Some sources fit Python better (forensic parsing and ad hoc data work), while
+TypeScript owns orchestration and process invocation. The repo intentionally
+keeps those concerns separate instead of forcing one runtime to own all
+parsing.
+
+The boundary is not "one service". It is "one shared contract". Extractors are
+designed to be independent subprocesses that output normalized records and
+fail in a recoverable way. That keeps the project flexible without losing the
+ability to reason about the data across domains.
+
+## The live orchestration model
+
+The current orchestration entrypoint lives in
+`packages-ts/orchestrator/main-orchestrator/main.ts`. It performs the same
+high-level role the older docs described:
+
+1. Create a `pipeline_runs` row for each backup.
+2. Create one `pipeline_stage_status` row per stage.
+3. Invoke each extractor as an isolated subprocess.
+4. Record success or failure separately for each stage.
+5. Continue to the next stage even when one fails.
+6. Run the reporting stage last so the report can be honest about what is and
+   is not present.
+
+This is an important design decision: a failed stage should be visible and
+recoverable, not fatal to the entire run.
 
 ## Failure is isolated, not fatal
 
-A guiding principle for this pipeline: **the user should be able to fix an
-error without being punished for having had one.** Concretely:
+The guiding principle is still: the user should not be punished for one bad
+stage.
 
-- Every stage's success/failure is recorded independently in
-  `pipeline_stage_status`. One extractor failing does not abort the run —
-  the orchestrator continues to the next stage regardless.
-- Re-running the orchestrator against the same backup is safe and cheap.
-  Extractors dedupe on `file_hash`, so already-ingested files are skipped;
-  only the previously-failed (or never-run) work actually happens.
-- The report never silently omits a failed domain. It reads
-  `pipeline_stage_status` first and states plainly what's present, what
-  failed and why, and what was never attempted — matching the same
-  "don't overstate what the data shows" principle applied to the crash
-  report's original incident-count problem.
+Concretely:
 
-## Why row-per-line for high-volume sources (e.g. gcloud logs, syslog)
+- Each extractor is responsible for catching its own errors and exiting
+  non-zero with enough detail to debug.
+- The orchestrator records stage status and continues.
+- A re-run is safe because extractors dedupe by source hash before writing
+  rows.
+- The report reads stage status first and explicitly marks missing or failed
+  domains instead of silently omitting them.
 
-Considered pre-aggregating at ingest time instead. Chose raw retention
-(one normalized row per source line, aggregation as a queryable view on
-top) because this pipeline may need to support a conclusion under
-scrutiny, not just present a summary — every row traces back to an exact
-source line via `raw_ref` → `ingested_files.raw_payload`. Aggregation
-logic can then live in SQL/application code and change without
-re-ingesting, whereas aggregating at ingest time bakes a clustering
-decision into storage and makes it expensive to reconsider.
+This matches the original design goal of being honest about uncertainty and
+keeping failed work recoverable.
+
+## Where the repo currently differs from older docs
+
+Older documentation still described a monolithic folder layout (`orchestrator/`,
+`db/`, `mvt-runner/` at the repo root). That structure no longer matches the
+current tree.
+
+The correct references today are:
+
+- `packages-ts/orchestrator/main-orchestrator` for stage orchestration
+- `packages-ts/orchestrator/mvt-runner` for the decrypt/workspace wrapper
+- `packages-py/db/migrate.py` for migration entrypoints
+- `reporting/generate_report.py` for report rendering
+- `packages-ts/contracts` and `packages-py/contracts` for shared schema files
+
+The architecture itself remains compatible with the original design intent;
+what changed is the package layout and the exact execution paths.
 
 ## Adding a new source
 
-See `contracts/EXTRACTOR_CONTRACT.md` for the full process-level contract.
-Short version: pick a language, satisfy the CLI/exit-code/idempotency
-contract, validate every written record against the shared
-`NormalizedRecord` schema, document your `fields` sub-shape in your
-extractor's own README, register the stage in `orchestrator/main.ts`.
+The process remains the same:
+
+1. pick the language that fits the source format
+2. normalize records to the shared contract
+3. validate against the shared schema before writing
+4. register the stage in the orchestrator
+5. document the extractor's own `fields` shape and failure behavior
+
+The contract is intentionally thin and process-based rather than library-based,
+which keeps the integration boundary stable even as the codebase evolves.

@@ -1,5 +1,5 @@
 /**
- * orchestrator/main.ts
+ * packages-ts/orchestrator/main-orchestrator/main.ts
  *
  * Conductor for a full investigation run. Creates a pipeline_run PER BACKUP,
  * invokes each extractor as an isolated subprocess stage, records per-stage
