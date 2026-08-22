@@ -1,0 +1,65 @@
+version: '3.8'
+
+services:
+  # VictoriaMetrics: metrics TSDB (Prometheus remote_write compatible)
+  victoria-metrics:
+    image: victoriametrics/victoria-metrics-single:latest
+    container_name: victoria-metrics
+    ports:
+      - '8428:8428'
+    volumes:
+      - vm-data:/var/lib/victoria-metrics
+    restart: unless-stopped
+
+  # Loki: logs store
+  loki:
+    image: grafana/loki:2.8.2
+    container_name: loki
+    ports:
+      - '3100:3100'
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - ./infra/loki-config.yaml:/etc/loki/local-config.yaml:ro
+      - loki-data:/loki
+    restart: unless-stopped
+
+  # Grafana: dashboards
+  grafana:
+    image: grafana/grafana:9.6.0
+    container_name: grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    ports:
+      - '3000:3000'
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./infra/grafana-datasource.yml:/etc/grafana/provisioning/datasources/all.yml:ro
+    restart: unless-stopped
+
+  # Vector: collector & processor (redaction + forward to Loki/VM)
+  vector:
+    image: timberio/vector:nightly-debian-$(uname -m)
+    container_name: vector
+    ports:
+      - '8686:8686' # Vector API
+    volumes:
+      - ./infra/vector.yaml:/etc/vector/vector.yaml:ro
+      - ./logs:/var/log/epoch:rw
+    command: ["vector", "-c", "/etc/vector/vector.yaml"]
+    restart: unless-stopped
+
+volumes:
+  vm-data:
+  loki-data:
+  grafana-data:
+
+# Notes:
+#  - This compose file is targeted at a local/offline deployment. All ports are
+#    bound to localhost by default when using Docker on a single-host system.
+#  - Adjust the Vector image tag to match your host architecture. The compose
+#    uses a simple `latest` / nightly tag for example purposes; pin to a stable
+#    tag for production.
+#  - Configure the product to write logs under ./logs (mounted into Vector).
+#  - Grafana provisioning is mounted from infra/grafana/provisioning.
