@@ -1,104 +1,110 @@
-# iOS Forensic Investigation Pipeline
+# Verichron Epoch / MVT Analyzer
 
-## What this is
+This repository is a mixed workspace for a forensic investigation pipeline and
+its local desktop client. The code is organized by responsibility and runtime,
+not by a single monolithic service layout.
 
-A pipeline that takes an MVT-decrypted iOS backup and produces a single,
-honest report correlating findings across multiple domains — crash
-telemetry, Safari history, SMS, network usage, and gcloud logs — on a
-shared time axis.
+## What is in this repo
 
-## Architecture at a glance
-
-Each top-level directory answers one question:
-
-| Directory | Question it answers |
+| Path | Purpose |
 | :--- | :--- |
-| `orchestrator/` | How does a run happen? |
-| `extractors/` | How does one source format become normalized data? |
-| `reporting/` | How does normalized data become a human-readable artifact? |
-| `contracts/` | What does normalized data look like? |
-| `db/` | Where does it live? |
-| `infra/` | How do I stand up dependencies locally? |
-| `docs/` | Why is it built this way? |
+| `epoch/` | Electron + React desktop client for reviewing findings and timelines. |
+| `packages-ts/` | TypeScript orchestration, contracts, and the mvt-runner wrapper. |
+| `packages-py/` | Python analysis, database migration tooling, and extractor/reporting code. |
+| `extractors/` | Project-specific extractor entrypoints and compatibility shims. |
+| `reporting/` | Human-readable report generation. |
+| `infra/` | Local infrastructure definition for Postgres. |
+| `docs/` | Design and architecture rationale. |
 
-Full rationale, including why this is a shared-contract ETL pattern rather
-than microservices, and why extractors are deliberately polyglot: see
-[`docs/architecture.md`](docs/architecture.md).
+The important point is that the runtime architecture is still a
+shared-contract ETL pipeline: each extractor normalizes its own domain into a
+common record schema, writes to Postgres, and the reporting layer renders a
+single honest view over the results. The current repo split reflects the real
+project structure, not an old one-folder mental model.
 
-## Why not one service
+## Current architecture in plain English
 
-Different source formats (`.ips` crash JSON, SQLite Safari history, SMS
-attachments, network usage tables, gcloud log exports) favor different
-tooling — Python for ad hoc forensic parsing, TypeScript where process
-orchestration already lives. Rather than force a single runtime, every
-extractor normalizes into one shared schema and writes to one Postgres
-store. Language choice per extractor is a local decision; the contract is
-the only thing that has to stay consistent. Details in
-[`docs/architecture.md`](docs/architecture.md).
+The design remains intentionally simple:
 
-## How a run works
+1. `packages-ts/orchestrator/main-orchestrator` creates a `pipeline_runs` row
+   and per-stage status rows for each backup.
+2. Extractors are invoked as isolated subprocesses. A failure in one stage is
+   recorded and isolated instead of aborting the rest of the run.
+3. `reporting/generate_report.py` runs last and renders a completeness section
+   before any domain findings, so failed or skipped stages remain visible in
+   the report.
+4. The underlying record contract is shared across extractors and the rest of
+   the pipeline, while each extractor remains free to choose its own language
+   and parsing strategy.
 
-1. `orchestrator/main.ts` creates a `pipeline_runs` row and a `pending`
-   `pipeline_stage_status` row per stage.
-2. Each extractor runs as an isolated subprocess. **A failing stage does
-   not abort the run** — the orchestrator records the failure and moves
-   on to the next stage.
-3. `reporting/generate_report.py` runs last, reads `pipeline_stage_status`
-   first, and renders an honest preface: what succeeded, what failed
-   (and why), what was never attempted — before rendering any findings.
-4. Fixing a failed extractor and re-running the pipeline against the same
-   backup is safe and cheap: extractors dedupe on file hash, so only the
-   previously-failed work actually re-runs.
+This is the same conceptual model described in [`docs/architecture.md`](docs/architecture.md); the main fix here is that the docs now point at the actual code paths in this repo.
 
-This is a deliberate design choice, not an afterthought — see "Failure is
-isolated, not fatal" in [`docs/architecture.md`](docs/architecture.md).
+## Repository-specific notes
 
-## Running it locally
+The current codebase still uses a few older names in narrative docs, but the
+live sources are organized like this:
+
+- The orchestrator entrypoint is in `packages-ts/orchestrator/main-orchestrator`.
+- The mvt-ios helper is in `packages-ts/orchestrator/mvt-runner`.
+- The Python migrations live in `packages-py/db/migrate.py`.
+- Shared contracts live under `packages-ts/contracts` and `packages-py/contracts`.
+- The desktop app is `epoch/`, not a root-level `app/` or `ui/` package.
+
+The repo is intentionally mixed by language and runtime; the contract is the
+stable boundary, not a shared library or monolithic process.
+
+## Local setup
 
 ```bash
-# 1. Start Postgres (fresh volume: migrations auto-apply via docker-entrypoint-initdb.d)
+# install the workspace dependencies
+pnpm install
+
+# start Postgres for local forensic runs
 cd infra && docker compose up -d
+cd ..
 
-# 1a. Applying a new migration to an already-running database (not a fresh
-#     volume)? The docker-entrypoint hook above only fires once, on first
-#     boot, so use the migration runner instead:
-python3 ../db/migrate.py --db-url postgresql://forensics:forensics_dev_only@localhost:5432/forensics
+# apply migrations if needed
+python3 packages-py/db/migrate.py --db-url postgresql://localhost:5432/forensics
 
-# 2. Decrypt your backups with mvt-runner (separate tool, see mvt-runner/)
-cd ../mvt-runner && npm install && npm run build
+# build the mvt-ios helper used to decrypt and prepare backups
+cd packages-ts/orchestrator/mvt-runner && npm install && npm run build
+cd ../../..
+```
+
+## Running a backup through the analysis pipeline
+
+```bash
+# from the repo root
+cd packages-ts/orchestrator/mvt-runner
 node dist/main.js --source ~/iPhone-Backups --workspace ~/mvt-workspace
 
-# 3. Install orchestrator deps
-cd ../orchestrator && pnpm install   # or npm/yarn — see package.json
-
-# 4. Run the pipeline against everything mvt-runner just decrypted
-DATABASE_URL=postgresql://forensics:forensics_dev_only@localhost:5432/forensics \
+cd ../main-orchestrator
+DATABASE_URL=postgresql://localhost:5432/forensics \
   pnpm run investigate --workspace ~/mvt-workspace
+```
 
-# ...or against specific decrypted-backup directories directly:
-DATABASE_URL=postgresql://forensics:forensics_dev_only@localhost:5432/forensics \
+This runs the full pipeline against every decrypted backup in
+`~/mvt-workspace/decrypted/*`, recording stage status and continuing past
+failed stages instead of aborting the rest of the run.
+
+You can also target specific backup directories directly:
+
+```bash
+DATABASE_URL=postgresql://localhost:5432/forensics \
   pnpm run investigate /path/to/decrypted/backup-a /path/to/decrypted/backup-b
 ```
 
-Re-running `pnpm run investigate --workspace ...` after new backups have
-been decrypted only processes what's new — a backup with a prior
-fully-succeeded run (no failed stages) is skipped automatically.
-
 ## Adding a new extractor
 
-See [`contracts/EXTRACTOR_CONTRACT.md`](contracts/EXTRACTOR_CONTRACT.md)
-for the full process-level contract (invocation, exit codes, idempotency,
-output shape, failure handling). Short version: any language is fine as
-long as it satisfies that contract and validates every record it writes
-against the shared `NormalizedRecord` schema
-(`contracts/normalized-record.schema.json`).
+See [`packages-ts/contracts/EXTRACTOR_CONTRACT.md`](packages-ts/contracts/EXTRACTOR_CONTRACT.md) for the process-level contract.
+The short version is still the same: satisfy the CLI contract, validate your
+normalized rows against the shared schema, record your stage status, and keep
+failure isolated rather than fatal.
 
 ## Status
 
-| Domain | Extractor status |
-| :--- | :--- |
-| Crash telemetry (`.ips`) | Migrating from standalone script — see `extractors/crash/README.md` |
-| Safari history | Not yet built — design notes in `extractors/safari/README.md` |
-| SMS | Not yet built — design notes in `extractors/sms/README.md` |
-| Network usage | Not yet built — design notes in `extractors/network/README.md` |
-| gcloud logs | Not yet built — design notes in `extractors/gcloud/README.md` |
+The repo is still evolving; some extractor domains are intentionally not yet
+wired in. The current project history is consistent with the architecture in
+[`docs/architecture.md`](docs/architecture.md), but the actual living layout is
+best understood by the package map above rather than the older monolithic
+folder names.

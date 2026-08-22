@@ -4,7 +4,8 @@ This is the interface a new extractor must satisfy to be wired into the
 orchestrator. It's deliberately thin — a subprocess contract, not a shared
 library — because extractors are polyglot on purpose (see
 `/docs/architecture.md`). Satisfying this contract is what makes adding a
-new source additive instead of a change to `orchestrator/main.ts`.
+new source additive instead of a change to
+`packages-ts/orchestrator/main-orchestrator/main.ts`.
 
 ## 1. Invocation
 
@@ -114,4 +115,4 @@ Failure is expected and must be recoverable, not fatal:
 3. Write your extractor under `/extractors/<name>/` with its own README
    documenting: expected input shape, the sub-shape of `fields` it
    produces, and its chosen partial-failure behavior (see #5).
-4. Register the stage name in `orchestrator/main.ts`'s stage list.
+4. Register the stage name in `packages-ts/orchestrator/main-orchestrator/main.ts`'s stage list.
