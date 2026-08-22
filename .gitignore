@@ -218,3 +218,17 @@ __marimo__/
 .streamlit/secrets.toml
 extractors/*/__pycache__/
 node_modules
+
+# Verichron Epoch: local pipeline outputs — these can contain real forensic
+# findings (browsing history, app usage, PII) from whatever backup was last
+# analyzed. Never committed, regardless of which directory they land in.
+*.db
+*.sqlite
+*.sqlite3
+epoch_forensics.db
+correlation_report.md
+investigation_report.md
+ileapp_raw_output/
+*_raw_output/
+workspace/
+mvt-workspace/
