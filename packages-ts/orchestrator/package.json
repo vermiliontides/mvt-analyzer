@@ -1,0 +1,28 @@
+{
+  "name": "@verichron/orchestrator",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@types/pg": "^8.23.1",
+    "@verichron/contracts": "workspace:*",
+    "pg": "^8.23.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "typescript": "^5.0.0"
+  },
+  "peerDependencies": {
+    "@types/node": "^20.19.43",
+    "typescript": "^5.0.0",
+    "@eslint/js": "^9.39.5",
+    "eslint": "^9.39.5",
+    "typescript-eslint": "^8.67.0"
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "name": "@verichron/epoch",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "main/index.js",
+  "scripts": {
+    "dev": "concurrently \"vite\" \"electron .\"",
+    "build": "tsc && vite build && electron-builder",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/ main/"
+  },
+  "build": {
+    "appId": "com.verichron.epoch",
+    "productName": "Verichron Epoch",
+    "directories": {
+      "output": "dist"
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "executableName": "verichron-epoch",
+      "category": "Utility"
+    }
+  },
+  "dependencies": {
+    "@verichron/contracts": "workspace:*",
+    "@verichron/orchestrator": "workspace:*",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "@vitejs/plugin-react": "^4.2.0",
+    "concurrently": "^8.2.0",
+    "electron": "^28.3.3",
+    "electron-builder": "^24.9.0",
+    "vite": "^5.0.0"
+  },
+    "peerDependencies": {
+    "@types/node": "^20.19.43",
+    "typescript": "^5.0.0",
+    "@eslint/js": "^9.39.5",
+    "eslint": "^9.39.5",
+    "typescript-eslint": "^8.67.0"
+  }
+}

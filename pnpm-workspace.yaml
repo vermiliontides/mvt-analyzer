@@ -1,0 +1,7 @@
+# pnpm-workspace.yaml
+packages:
+  - 'epoch'
+  - 'packages-ts/*'
+allowBuilds:
+  electron: false
+  esbuild: false
