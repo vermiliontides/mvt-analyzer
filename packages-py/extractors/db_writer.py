@@ -31,9 +31,12 @@ from typing import Any
 import psycopg2
 import psycopg2.extras
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "contracts"))
-from normalized_record import NormalizedRecord  # noqa: E402
+# Resolve packages-py directory
+_EXTRACTORS_DIR = Path(__file__).resolve().parent
+_PACKAGES_PY = _EXTRACTORS_DIR.parent
+sys.path.insert(0, str(_PACKAGES_PY / "contracts"))
 
+from normalized_record import NormalizedRecord, SourceType  # noqa: E402
 
 def compute_file_hash(path: str | Path) -> str:
     """sha256 of file contents — the idempotency key for ingested_files.

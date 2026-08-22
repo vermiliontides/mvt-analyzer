@@ -43,10 +43,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-_EXTRACTORS_DIR = Path(__file__).resolve().parent.parent
-_REPO_ROOT = _EXTRACTORS_DIR.parent
-sys.path.insert(0, str(_EXTRACTORS_DIR))               # db_writer.py lives here
-sys.path.insert(0, str(_REPO_ROOT / "contracts"))       # normalized_record.py lives here
+_EXTRACTORS_DIR = Path(__file__).resolve().parent.parent  # packages-py/extractors
+_PACKAGES_PY = _EXTRACTORS_DIR.parent                      # packages-py
+
+sys.path.insert(0, str(_EXTRACTORS_DIR))
+sys.path.insert(0, str(_PACKAGES_PY / "contracts"))
 from db_writer import ingest_file, write_records  # noqa: E402
 from normalized_record import NormalizedRecord, SourceType  # noqa: E402
 

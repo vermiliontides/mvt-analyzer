@@ -99,9 +99,6 @@ importers:
       '@eslint/js':
         specifier: ^9.39.5
         version: 9.39.5
-      '@types/pg':
-        specifier: ^8.23.1
-        version: 8.23.1
       '@verichron/contracts':
         specifier: workspace:*
         version: link:../contracts
@@ -111,19 +108,19 @@ importers:
       pg:
         specifier: ^8.23.0
         version: 8.23.0
-      typescript-eslint:
-        specifier: ^8.67.0
-        version: 8.67.0(eslint@9.39.5(supports-color@8.1.1))(supports-color@8.1.1)(typescript@5.9.3)
-      zod:
-        specifier: ^4.4.3
-        version: 4.4.3
-    devDependencies:
-      '@types/node':
-        specifier: ^20.19.43
-        version: 20.19.43
       typescript:
         specifier: ^5.0.0
         version: 5.9.3
+      typescript-eslint:
+        specifier: ^8.67.0
+        version: 8.67.0(eslint@9.39.5(supports-color@8.1.1))(supports-color@8.1.1)(typescript@5.9.3)
+    devDependencies:
+      '@types/node':
+        specifier: ^20.0.0
+        version: 20.19.43
+      '@types/pg':
+        specifier: ^8.23.1
+        version: 8.23.1
 
 packages:
 

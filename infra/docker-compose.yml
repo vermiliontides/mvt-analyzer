@@ -17,4 +17,5 @@ services:
       retries: 5
 
 volumes:
-  forensics_pgdata:
+  - forensics_pgdata:/var/lib/postgresql/data
+  - ../packages-py/db/migrations:/docker-entrypoint-initdb.d
