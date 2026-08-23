@@ -9,7 +9,7 @@ services:
       - "5432:5432"
     volumes:
       - forensics_pgdata:/var/lib/postgresql/data
-      - ../db/migrations:/docker-entrypoint-initdb.d
+      - ../packages-py/db/migrations:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U forensics"]
       interval: 5s
@@ -17,5 +17,4 @@ services:
       retries: 5
 
 volumes:
-  - forensics_pgdata:/var/lib/postgresql/data
-  - ../packages-py/db/migrations:/docker-entrypoint-initdb.d
+  forensics_pgdata: {}
