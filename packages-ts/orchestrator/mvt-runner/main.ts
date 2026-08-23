@@ -34,7 +34,7 @@
  * the original decrypted-but-corrupt bytes are never silently discarded.
  *
  * Build:  npm install && npm run build
- * Usage:  node dist/main.js --source ~/iPhone-Backups/02_iPhone_Backups --workspace ~/mvt-workspace
+ * Usage:  node dist/main.js --source ./backups --workspace ./mvt-workspace
  *   or, without a build step: npx tsx main.ts --source ... --workspace ...
  */
 
@@ -126,8 +126,8 @@ function printUsage() {
 
 Options:
   --source <dir>          directory containing backup subdirectories (required)
-  --workspace <dir>        workspace directory for hashes/decrypted/results (default: ~/mvt-workspace)
-  --mvt-bin <path>         path to mvt-ios binary (default: ~/mvt/.venv/bin/mvt-ios)
+  --workspace <dir>        workspace directory for hashes/decrypted/results (default: ./mvt-workspace)
+  --mvt-bin <path>         path to mvt-ios binary (default: <repo-root>/.venv/bin/mvt-ios or your active mvt venv)
   --sqlite-bin <path>      path to sqlite3 binary used for repairing malformed DBs (default: "sqlite3" on PATH)
   --force                  re-run check-backup even if already done (does NOT touch decrypt/repair state)
   --force-decrypt          re-run decrypt-backup, repair, and check-backup even if already done

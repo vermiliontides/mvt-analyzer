@@ -53,9 +53,21 @@ live sources are organized like this:
 The repo is intentionally mixed by language and runtime; the contract is the
 stable boundary, not a shared library or monolithic process.
 
+A repo-root `.venv` is expected and required before any Python pipeline script
+runs. The project checks for `<repo-root>/.venv/bin/python` and exits with a
+clear setup error if it is missing. This is intentional: the repo's Python
+scripts share one interpreter and dependency set for Postgres access, extractor
+normalization, and reporting.
+
 ## Local setup
 
 ```bash
+# create the repo-local Python environment first; this is required for all Python scripts
+python3 -m venv .venv
+. .venv/bin/activate
+pip install --upgrade pip
+pip install -r packages-py/requirements.txt
+
 # install the workspace dependencies
 pnpm install
 
@@ -64,7 +76,7 @@ cd infra && docker compose up -d
 cd ..
 
 # apply migrations if needed
-python3 packages-py/db/migrate.py --db-url postgresql://localhost:5432/forensics
+python3 packages-py/db/migrate.py --db-url postgresql://forensics:forensics_dev_only@localhost:5432/forensics
 
 # build the mvt-ios helper used to decrypt and prepare backups
 cd packages-ts/orchestrator/mvt-runner && npm install && npm run build
@@ -76,21 +88,21 @@ cd ../../..
 ```bash
 # from the repo root
 cd packages-ts/orchestrator/mvt-runner
-node dist/main.js --source ~/iPhone-Backups --workspace ~/mvt-workspace
+node dist/main.js --source ./backups --workspace ./mvt-workspace
 
 cd ../main-orchestrator
-DATABASE_URL=postgresql://localhost:5432/forensics \
-  pnpm run investigate --workspace ~/mvt-workspace
+DATABASE_URL=postgresql://forensics:forensics_dev_only@localhost:5432/forensics \
+  pnpm run investigate --workspace ./mvt-workspace
 ```
 
 This runs the full pipeline against every decrypted backup in
-`~/mvt-workspace/decrypted/*`, recording stage status and continuing past
+`./mvt-workspace/decrypted/*`, recording stage status and continuing past
 failed stages instead of aborting the rest of the run.
 
 You can also target specific backup directories directly:
 
 ```bash
-DATABASE_URL=postgresql://localhost:5432/forensics \
+DATABASE_URL=postgresql://forensics:forensics_dev_only@localhost:5432/forensics \
   pnpm run investigate /path/to/decrypted/backup-a /path/to/decrypted/backup-b
 ```
 

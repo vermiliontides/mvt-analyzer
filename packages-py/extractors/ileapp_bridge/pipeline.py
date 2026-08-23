@@ -8,6 +8,11 @@ import shutil
 import sys
 from pathlib import Path
 
+_PY_ROOT = Path(__file__).resolve().parents[2]
+if str(_PY_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PY_ROOT))
+from runtime_env import fatal_if_missing_venv
+
 from extractors.ileapp_bridge.main import run_pipeline as run_ileapp_main
 
 
@@ -29,6 +34,7 @@ def run_pipeline(artifact_path: str, output_dir: str, db_url: str | None = None,
 
 
 if __name__ == "__main__":
+    fatal_if_missing_venv()
     parser = argparse.ArgumentParser(description="Verichron iLEAPP Postgres ingestion pipeline")
     parser.add_argument("--input", "-i", required=True, help="Path to target forensic artifact")
     parser.add_argument("--output", "-o", default="./ileapp_raw_output", help="Staging directory")

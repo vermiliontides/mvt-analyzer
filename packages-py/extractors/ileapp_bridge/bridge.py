@@ -9,6 +9,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+_PY_ROOT = Path(__file__).resolve().parents[2]
+if str(_PY_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PY_ROOT))
+from runtime_env import fatal_if_missing_venv
+
 
 def _module_available(module_name: str) -> bool:
     return importlib.util.find_spec(module_name) is not None
@@ -69,6 +74,7 @@ def run_ileapp_extraction(artifact_path: str, output_dir: str) -> dict:
 
 
 if __name__ == "__main__":
+    fatal_if_missing_venv()
     if len(sys.argv) < 3:
         print("Usage: python bridge.py <path_to_backup> <output_dir>")
         sys.exit(1)

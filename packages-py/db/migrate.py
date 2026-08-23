@@ -25,6 +25,11 @@ import argparse
 import sys
 from pathlib import Path
 
+_PY_ROOT = Path(__file__).resolve().parents[1]
+if str(_PY_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PY_ROOT))
+from runtime_env import fatal_if_missing_venv
+
 import psycopg2
 
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
@@ -107,6 +112,7 @@ def apply_migration(conn, path: Path) -> None:
 
 
 def main() -> None:
+    fatal_if_missing_venv()
     parser = argparse.ArgumentParser()
     parser.add_argument("--db-url", required=True)
     args = parser.parse_args()
@@ -147,4 +153,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    fatal_if_missing_venv()
     main()
