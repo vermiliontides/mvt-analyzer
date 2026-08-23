@@ -50,7 +50,7 @@ export class IngestionOrchestrator {
     }
 
     const outputPath = options.outputPath || path.join(this.workspaceRoot as string, 'ileapp_raw_output');
-    const dbUrl = process.env.DATABASE_URL ?? 'postgresql://localhost:5432/forensics';
+    const dbUrl = process.env.DATABASE_URL ?? 'postgresql://forensics:forensics_dev_only@localhost:5432/forensics';
     const runId = randomUUID();
 
     const args = [

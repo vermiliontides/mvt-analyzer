@@ -254,7 +254,7 @@ async function parseCliConfig(): Promise<CliConfig> {
     allowPositionals: true,
   });
 
-  const dbUrl = process.env.DATABASE_URL ?? "postgresql://localhost:5432/forensics";
+  const dbUrl = process.env.DATABASE_URL ?? "postgresql://forensics:forensics_dev_only@localhost:5432/forensics";
 
   if (values.workspace) {
     const decryptedDir = path.join(values.workspace, "decrypted");

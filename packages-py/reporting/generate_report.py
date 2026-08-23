@@ -25,6 +25,11 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+_PY_ROOT = Path(__file__).resolve().parents[1]
+if str(_PY_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PY_ROOT))
+from runtime_env import fatal_if_missing_venv
+
 import psycopg2
 import psycopg2.extras
 
@@ -344,6 +349,7 @@ def generate_report(conn, run_id: str, output_path: str, results_path: str | Non
 
 
 def main():
+    fatal_if_missing_venv()
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--backup-path", required=False)  # unused here, present for contract consistency
@@ -368,4 +374,5 @@ def main():
 
 
 if __name__ == "__main__":
+    fatal_if_missing_venv()
     main()
