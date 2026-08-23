@@ -34,7 +34,7 @@ cd ..
 ### 2. Apply migrations
 
 ```bash
-python3 packages-py/db/migrate.py --db-url postgresql://localhost:5432/forensics
+python3 packages-py/db/migrate.py --db-url postgresql://forensics:forensics_dev_only@localhost:5432/forensics
 ```
 
 This is safe to run repeatedly; it is idempotent and will report when nothing
@@ -46,7 +46,7 @@ new needs to be applied.
 cd packages-ts/orchestrator/mvt-runner
 npm install
 npm run build
-node dist/main.js --source ~/iPhone-Backups --workspace ~/mvt-workspace
+node dist/main.js --source ./backups --workspace ./mvt-workspace
 cd ../../..
 ```
 
@@ -59,8 +59,8 @@ cd ../../..
 
 ```bash
 cd packages-ts/orchestrator/main-orchestrator
-DATABASE_URL=postgresql://localhost:5432/forensics \
-  pnpm run investigate --workspace ~/mvt-workspace
+DATABASE_URL=postgresql://forensics:forensics_dev_only@localhost:5432/forensics \
+  pnpm run investigate --workspace ./mvt-workspace
 cd ../../..
 ```
 
@@ -73,7 +73,7 @@ You can also target explicit decrypted backups directly:
 
 ```bash
 cd packages-ts/orchestrator/main-orchestrator
-DATABASE_URL=postgresql://localhost:5432/forensics \
+DATABASE_URL=postgresql://forensics:forensics_dev_only@localhost:5432/forensics \
   pnpm run investigate /path/to/decrypted/backup-a /path/to/decrypted/backup-b
 ```
 
@@ -84,7 +84,7 @@ If you already have a `run_id` and only want to render the Markdown output again
 ```bash
 python3 packages-py/reporting/generate_report.py \\
   --run-id <uuid-from-orchestrator-output> \
-  --db-url postgresql://localhost:5432/forensics \
+  --db-url postgresql://forensics:forensics_dev_only@localhost:5432/forensics \
   --output investigation_report.md
 ```
 
@@ -95,12 +95,12 @@ report without re-running the extractors.
 
 ```bash
 # Is Postgres reachable and up to date?
-python3 packages-py/db/migrate.py --db-url postgresql://localhost:5432/forensics
+python3 packages-py/db/migrate.py --db-url postgresql://forensics:forensics_dev_only@localhost:5432/forensics
 
 # What backups are already decrypted?
-ls ~/mvt-workspace/decrypted/
+ls ./mvt-workspace/decrypted/
 
 # What runs have happened recently?
-psql postgresql://localhost:5432/forensics \
+psql postgresql://forensics:forensics_dev_only@localhost:5432/forensics \
   -c "SELECT run_id, backup_source, started_at, finished_at FROM pipeline_runs ORDER BY started_at DESC LIMIT 5;"
 ```
