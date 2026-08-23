@@ -30,7 +30,7 @@ The design remains intentionally simple:
    and per-stage status rows for each backup.
 2. Extractors are invoked as isolated subprocesses. A failure in one stage is
    recorded and isolated instead of aborting the rest of the run.
-3. `reporting/generate_report.py` runs last and renders a completeness section
+3. `packages-py/reporting/generate_report.py` runs last and renders a completeness section
    before any domain findings, so failed or skipped stages remain visible in
    the report.
 4. The underlying record contract is shared across extractors and the rest of
