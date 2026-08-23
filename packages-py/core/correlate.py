@@ -28,6 +28,11 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+_PY_ROOT = Path(__file__).resolve().parents[1]
+if str(_PY_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PY_ROOT))
+from runtime_env import fatal_if_missing_venv
+
 CORRELATION_WINDOW = timedelta(minutes=15)
 # Modules whose per-second churn is real but not semantically interesting
 # for a human reading a correlation window (backup-internal bookkeeping,
@@ -142,6 +147,7 @@ def fmt_desc(desc, maxlen=140):
 
 
 def main():
+    fatal_if_missing_venv()
     ap = argparse.ArgumentParser()
     ap.add_argument("--results-dir", required=True, type=Path)
     ap.add_argument("--backup-date", required=True, help="e.g. '2026-05-28 11:23:38' (from backup_info.json 'Last Backup Date')")
@@ -218,4 +224,5 @@ def main():
 
 
 if __name__ == "__main__":
+    fatal_if_missing_venv()
     main()

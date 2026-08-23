@@ -8,6 +8,11 @@ import json
 import sys
 from datetime import datetime
 from pathlib import Path
+
+_PY_ROOT = Path(__file__).resolve().parents[2]
+if str(_PY_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PY_ROOT))
+from runtime_env import fatal_if_missing_venv
 from typing import Any
 
 _EXTRACTORS_DIR = Path(__file__).resolve().parent.parent
@@ -160,6 +165,7 @@ def run_pipeline(artifact_path: str, output_dir: str, db_url: str, run_id: str |
 
 
 def main() -> int:
+    fatal_if_missing_venv()
     parser = argparse.ArgumentParser(description="Run the iLEAPP bridge using the repo's shared Postgres extractor contract")
     parser.add_argument("--run-id", required=True, help="Pipeline run id assigned by the orchestrator")
     parser.add_argument("--backup-path", required=True, help="Decrypted iPhone backup or extraction directory")
@@ -182,4 +188,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    fatal_if_missing_venv()
     sys.exit(main())
