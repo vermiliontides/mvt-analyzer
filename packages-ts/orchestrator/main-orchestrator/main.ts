@@ -71,14 +71,14 @@ interface StageDefinition {
 // not run literally. Keeping "python3" as the declared command (rather than
 // e.g. an empty string) keeps this table self-explanatory to read.
 const STAGES: StageDefinition[] = [
-  { name: "crash", command: "python3", args: ["../extractors/crash/main.py"] },
-  { name: "ileapp", command: "python3", args: ["../extractors/ileapp_bridge/main.py"] },
-  { name: "safari", command: "python3", args: ["../extractors/safari/main.py"] },
-  { name: "sms", command: "python3", args: ["../extractors/sms/main.py"] },
-  { name: "network", command: "python3", args: ["../extractors/network/main.py"] },
-  { name: "gcloud", command: "python3", args: ["../extractors/gcloud/main.py"] },
-  { name: "mvt_iocs", command: "python3", args: ["../extractors/mvt_iocs/main.py"] },
-  { name: "report", command: "python3", args: ["../reporting/generate_report.py"] },
+  { name: "crash", command: "python3", args: ["../../../packages-py/extractors/crash/main.py"] },
+  { name: "ileapp", command: "python3", args: ["../../../packages-py/extractors/ileapp_bridge/main.py"] },
+  { name: "safari", command: "python3", args: ["../../../packages-py/extractors/safari/main.py"] },
+  { name: "sms", command: "python3", args: ["../../../packages-py/extractors/sms/main.py"] },
+  { name: "network", command: "python3", args: ["../../../packages-py/extractors/network/main.py"] },
+  { name: "gcloud", command: "python3", args: ["../../../packages-py/extractors/gcloud/main.py"] },
+  { name: "mvt_iocs", command: "python3", args: ["../../../packages-py/extractors/mvt_iocs/main.py"] },
+  { name: "report", command: "python3", args: ["../../../packages-py/reporting/generate_report.py"] },
 ];
 
 interface RunConfig {

@@ -8,7 +8,7 @@ layout is:
 - `packages-ts/orchestrator/mvt-runner` for the mvt-ios wrapper
 - `packages-ts/orchestrator/main-orchestrator` for the orchestration CLI
 - `packages-py/db/migrate.py` for DB migrations
-- `reporting/generate_report.py` for report rendering
+- `packages-py/reporting/generate_report.py` for report rendering
 
 The logic is the same as the architecture describes: decrypt backups,
 normalize them into a shared contract, run extractor stages, and render an
@@ -82,7 +82,7 @@ DATABASE_URL=postgresql://localhost:5432/forensics \
 If you already have a `run_id` and only want to render the Markdown output again:
 
 ```bash
-python3 reporting/generate_report.py \
+python3 packages-py/reporting/generate_report.py \\
   --run-id <uuid-from-orchestrator-output> \
   --db-url postgresql://localhost:5432/forensics \
   --output investigation_report.md
