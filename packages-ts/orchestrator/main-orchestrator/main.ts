@@ -32,6 +32,15 @@
  * path with no 'decrypted' segment), it's simply omitted — extractors
  * that need it fail with their own clear error rather than the
  * orchestrator guessing.
+ *
+ * Python interpreter resolution: every stage below is a Python subprocess.
+ * We resolve <repo-root>/.venv/bin/python once at startup (mirroring
+ * orchestrator/src/index.ts, which already does this for the iLEAPP-only
+ * orchestrator) rather than spawning bare "python3" per stage. A bare
+ * "python3" on PATH is not guaranteed to be the project's virtualenv —
+ * on a dev machine with both a system Python and a project venv, every
+ * stage would fail with ModuleNotFoundError: psycopg2, and nothing about
+ * that error would point back at "wrong interpreter" as the cause.
  */
 
 import { spawn } from "node:child_process";
@@ -40,6 +49,10 @@ import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 interface StageDefinition {
   name: string;
@@ -52,6 +65,11 @@ interface StageDefinition {
 // Order matters only in that "report" must run last — extractors themselves
 // are independent and could run concurrently later if that ever becomes a
 // bottleneck (see /docs/architecture.md for why we're not doing that yet).
+//
+// command is "python3" as a placeholder token here — at spawn time it's
+// swapped for the resolved venv interpreter (see resolvePythonBin below),
+// not run literally. Keeping "python3" as the declared command (rather than
+// e.g. an empty string) keeps this table self-explanatory to read.
 const STAGES: StageDefinition[] = [
   { name: "crash", command: "python3", args: ["../extractors/crash/main.py"] },
   { name: "ileapp", command: "python3", args: ["../extractors/ileapp_bridge/main.py"] },
@@ -67,6 +85,34 @@ interface RunConfig {
   backupPath: string;
   resultsPath?: string;
   dbUrl: string;
+  pythonBin: string;
+}
+
+/**
+ * Resolves the Python interpreter every stage subprocess should use.
+ * Prefers <repo-root>/.venv/bin/python (this file lives at
+ * packages-ts/orchestrator/main-orchestrator/main.ts, so repo root is
+ * three levels up). Falls back to bare "python3" on PATH with a loud
+ * warning if no venv is found there, rather than failing outright —
+ * some environments (CI containers, a globally-managed interpreter) may
+ * intentionally not use a local .venv.
+ */
+async function resolvePythonBin(): Promise<string> {
+  const repoRoot = path.resolve(__dirname, "../../../");
+  const venvPython = path.join(repoRoot, ".venv", "bin", "python");
+  try {
+    await fsp.access(venvPython);
+    console.log(`[orchestrator] using venv interpreter: ${venvPython}`);
+    return venvPython;
+  } catch {
+    console.warn(
+      `[orchestrator] no virtualenv found at ${venvPython} — falling back to "python3" on PATH. ` +
+        `If that isn't this project's virtualenv, every extractor stage will fail with ` +
+        `ModuleNotFoundError (e.g. psycopg2). Create the venv or pass a correctly-activated ` +
+        `PATH before running the orchestrator.`
+    );
+    return "python3";
+  }
 }
 
 /**
@@ -145,6 +191,12 @@ async function markStage(
  * failure is communicated via the returned status, never via a thrown
  * error, because a thrown error here is exactly the thing that would
  * take down the rest of the run.
+ *
+ * The stage's declared `command` ("python3") is a placeholder — the
+ * actually-spawned interpreter is always `config.pythonBin`, resolved
+ * once per orchestrator invocation by resolvePythonBin(). Stages whose
+ * declared command isn't "python3" (none currently, but kept generic in
+ * case a non-Python stage is added later) are spawned as declared.
  */
 function runStage(
   stage: StageDefinition,
@@ -156,7 +208,8 @@ function runStage(
     if (config.resultsPath) {
       extraArgs.push("--results-path", config.resultsPath);
     }
-    const child = spawn(stage.command, [...stage.args, ...extraArgs], {
+    const bin = stage.command === "python3" ? config.pythonBin : stage.command;
+    const child = spawn(bin, [...stage.args, ...extraArgs], {
       stdio: ["ignore", "pipe", "pipe"],
     });
 
@@ -261,7 +314,8 @@ async function parseCliConfig(): Promise<CliConfig> {
 async function runPipelineForBackup(
   client: Client,
   backupPath: string,
-  dbUrl: string
+  dbUrl: string,
+  pythonBin: string
 ): Promise<{ runId: string; results: { stage: string; success: boolean }[] }> {
   const runId = await createRun(client, backupPath);
   const resultsPath = deriveResultsPath(backupPath);
@@ -276,7 +330,7 @@ async function runPipelineForBackup(
     console.log(`[orchestrator] -> ${stage.name}`);
     await markStage(client, runId, stage.name, "running");
 
-    const { success, stderr } = await runStage(stage, { backupPath, resultsPath, dbUrl }, runId);
+    const { success, stderr } = await runStage(stage, { backupPath, resultsPath, dbUrl, pythonBin }, runId);
 
     if (success) {
       await markStage(client, runId, stage.name, "succeeded");
@@ -296,6 +350,7 @@ async function runPipelineForBackup(
 
 async function main() {
   const cfg = await parseCliConfig();
+  const pythonBin = await resolvePythonBin();
 
   const dbUrl = cfg.dbUrl;
   const client = new Client({ connectionString: dbUrl });
@@ -313,7 +368,7 @@ async function main() {
     }
     console.log(`\n[orchestrator] ===== ${backupPath} =====`);
     try {
-      const { runId, results } = await runPipelineForBackup(client, backupPath, dbUrl);
+      const { runId, results } = await runPipelineForBackup(client, backupPath, dbUrl, pythonBin);
       const failedStages = results.filter((r) => !r.success).map((r) => r.stage);
       summary.push({ backupPath, runId, failedStages });
     } catch (err) {

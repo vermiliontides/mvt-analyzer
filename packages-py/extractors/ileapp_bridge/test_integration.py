@@ -220,7 +220,18 @@ def test_large_sqlite_table_streaming() -> None:
 
 
 def test_timestamp_normalization() -> None:
-    """Test that timestamps in various formats are normalized to ISO8601 UTC."""
+    """Test that timestamps in various formats are normalized to ISO8601 UTC,
+    and that an unparseable timestamp comes back null rather than a
+    fabricated wall-clock value.
+
+    normalize_timestamp() deliberately does NOT fall back to
+    datetime.now(UTC) for missing/invalid input (see normalizer.py's
+    docstring) — a fabricated "now" would silently land inside someone's
+    correlation window and read as real evidence. A record with a
+    genuinely unparseable source timestamp must produce a null
+    event_time, matching extractors/crash/main.py's parse_crash_time
+    convention.
+    """
     print("TEST: Timestamp normalization...")
     tmpdir = tempfile.mkdtemp()
     try:
@@ -235,12 +246,13 @@ def test_timestamp_normalization() -> None:
         records = parse_artifact_file(csv_file)
         normalized_list = [normalize_record(r) for r in records]
 
-        # All should have valid timestamps (normalizer fills in current time for missing/invalid)
+        # Parseable timestamps normalize to a real value.
         assert normalized_list[0].event_time is not None
         assert normalized_list[1].event_time is not None
-        assert normalized_list[2].event_time is not None  # Filled with current time for invalid
+        # Unparseable timestamp must come back null, not a fabricated "now".
+        assert normalized_list[2].event_time is None
 
-        # Verify ISO8601 format with timezone
+        # Verify ISO8601 format with timezone on a parsed value.
         event_time_str = str(normalized_list[0].event_time)
         assert "+" in event_time_str or "Z" in event_time_str, f"Expected timezone in {event_time_str}"
 
