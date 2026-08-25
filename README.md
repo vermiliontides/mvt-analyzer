@@ -108,7 +108,7 @@ DATABASE_URL=postgresql://forensics:forensics_dev_only@localhost:5432/forensics 
 
 ## Adding a new extractor
 
-See [`packages-ts/contracts/EXTRACTOR_CONTRACT.md`](packages-ts/contracts/EXTRACTOR_CONTRACT.md) for the process-level contract.
+See [`contracts/EXTRACTOR_CONTRACT.md`](contracts/EXTRACTOR_CONTRACT.md) for the process-level contract.
 The short version is still the same: satisfy the CLI contract, validate your
 normalized rows against the shared schema, record your stage status, and keep
 failure isolated rather than fatal.

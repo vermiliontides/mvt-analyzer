@@ -57,7 +57,7 @@ The extractor uses file content hashing (sha256) to deduplicate `ingested_files`
 
 ## CLI Contract
 
-See `packages-ts/contracts/EXTRACTOR_CONTRACT.md` for the full extractor contract. This stage accepts:
+See `contracts/EXTRACTOR_CONTRACT.md` for the full extractor contract. This stage accepts:
 
 ```
 python3 main.py \
