@@ -54,6 +54,12 @@ import { fileURLToPath } from "node:url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// This file lives at packages-ts/orchestrator/main-orchestrator/main.ts, so
+// repo root is three levels up — same computation resolvePythonBin() below
+// uses for the venv interpreter.
+const REPO_ROOT = path.resolve(__dirname, "../../../");
+const PACKAGES_PY = path.join(REPO_ROOT, "packages-py");
+
 interface StageDefinition {
   name: string;
   /** Executable + args to invoke this stage. Extends with --run-id/--backup-path/--results-path/--db-url at call time. */
@@ -70,15 +76,28 @@ interface StageDefinition {
 // swapped for the resolved venv interpreter (see resolvePythonBin below),
 // not run literally. Keeping "python3" as the declared command (rather than
 // e.g. an empty string) keeps this table self-explanatory to read.
+//
+// Script paths are built from PACKAGES_PY (an absolute path derived from
+// __dirname) rather than left as bare relative strings. node's spawn()
+// resolves relative argv entries against process.cwd(), not the caller's
+// __dirname — so a relative string here only works if the orchestrator is
+// launched from exactly this directory (as RUNBOOK.md/README.md currently
+// document). Any other invocation (CI, a wrapper script, a future build
+// step) would fail every stage with an opaque ENOENT and nothing pointing
+// at "wrong cwd" as the cause — the same failure mode resolvePythonBin()
+// was written to avoid for the interpreter. Building these from __dirname
+// makes correctness independent of the caller's cwd, matching
+// orchestrator/src/index.ts's IngestionOrchestrator, which already
+// resolves its script path this way.
 const STAGES: StageDefinition[] = [
-  { name: "crash", command: "python3", args: ["../../../packages-py/extractors/crash/main.py"] },
-  { name: "ileapp", command: "python3", args: ["../../../packages-py/extractors/ileapp_bridge/main.py"] },
-  { name: "safari", command: "python3", args: ["../../../packages-py/extractors/safari/main.py"] },
-  { name: "sms", command: "python3", args: ["../../../packages-py/extractors/sms/main.py"] },
-  { name: "network", command: "python3", args: ["../../../packages-py/extractors/network/main.py"] },
-  { name: "gcloud", command: "python3", args: ["../../../packages-py/extractors/gcloud/main.py"] },
-  { name: "mvt_iocs", command: "python3", args: ["../../../packages-py/extractors/mvt_iocs/main.py"] },
-  { name: "report", command: "python3", args: ["../../../packages-py/reporting/generate_report.py"] },
+  { name: "crash", command: "python3", args: [path.join(PACKAGES_PY, "extractors", "crash", "main.py")] },
+  { name: "ileapp", command: "python3", args: [path.join(PACKAGES_PY, "extractors", "ileapp_bridge", "main.py")] },
+  { name: "safari", command: "python3", args: [path.join(PACKAGES_PY, "extractors", "safari", "main.py")] },
+  { name: "sms", command: "python3", args: [path.join(PACKAGES_PY, "extractors", "sms", "main.py")] },
+  { name: "network", command: "python3", args: [path.join(PACKAGES_PY, "extractors", "network", "main.py")] },
+  { name: "gcloud", command: "python3", args: [path.join(PACKAGES_PY, "extractors", "gcloud", "main.py")] },
+  { name: "mvt_iocs", command: "python3", args: [path.join(PACKAGES_PY, "extractors", "mvt_iocs", "main.py")] },
+  { name: "report", command: "python3", args: [path.join(PACKAGES_PY, "reporting", "generate_report.py")] },
 ];
 
 interface RunConfig {
@@ -90,16 +109,16 @@ interface RunConfig {
 
 /**
  * Resolves the Python interpreter every stage subprocess should use.
- * Prefers <repo-root>/.venv/bin/python (this file lives at
- * packages-ts/orchestrator/main-orchestrator/main.ts, so repo root is
- * three levels up). Falls back to bare "python3" on PATH with a loud
- * warning if no venv is found there, rather than failing outright —
- * some environments (CI containers, a globally-managed interpreter) may
- * intentionally not use a local .venv.
+ * Prefers <repo-root>/.venv/bin/python (REPO_ROOT, computed once above
+ * from __dirname — the same constant the STAGES table's script paths are
+ * built from, so interpreter and script resolution can't drift apart).
+ * Falls back to bare "python3" on PATH with a loud warning if no venv is
+ * found there, rather than failing outright — some environments (CI
+ * containers, a globally-managed interpreter) may intentionally not use
+ * a local .venv.
  */
 async function resolvePythonBin(): Promise<string> {
-  const repoRoot = path.resolve(__dirname, "../../../");
-  const venvPython = path.join(repoRoot, ".venv", "bin", "python");
+  const venvPython = path.join(REPO_ROOT, ".venv", "bin", "python");
   try {
     await fsp.access(venvPython);
     console.log(`[orchestrator] using venv interpreter: ${venvPython}`);

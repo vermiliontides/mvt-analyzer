@@ -21,6 +21,7 @@ sys.path.insert(0, str(_EXTRACTORS_DIR))
 sys.path.insert(0, str(_REPO_ROOT / "packages-py" / "contracts"))
 
 from db_writer import ingest_file, write_records  # noqa: E402
+from etl_run import ETLRunResult  # noqa: E402
 from normalized_record import NormalizedRecord, SourceType  # noqa: E402
 
 # Add the bridge module to the path for import
@@ -104,10 +105,11 @@ def _summarize_raw_payload(file_path: Path, records: list[dict]) -> dict[str, An
     }
 
 
-def process_artifact_file(conn, run_id: str, file_path: Path) -> int:
+def process_artifact_file(conn, run_id: str, file_path: Path) -> ETLRunResult:
+    result = ETLRunResult()
     records = parse_artifact_file(file_path)
     if not records:
-        return 0
+        return result  # nothing in this artifact — empty, not a failure
 
     summary = _summarize_raw_payload(file_path, records)
     file_hash, already_ingested = ingest_file(
@@ -118,40 +120,57 @@ def process_artifact_file(conn, run_id: str, file_path: Path) -> int:
         raw_payload=summary,
     )
     if already_ingested:
-        return 0
+        return result
 
     normalized_records = []
-    for record in records:
+    for i, record in enumerate(records):
         try:
             normalized_records.append(normalize_record(record))
-        except Exception as exc:  # pragma: no cover - logged per-file, not fatal to the rest
-            print(f"[-] Dropping malformed record from {file_path.name}: {exc}", file=sys.stderr)
+        except Exception as exc:
+            result.fail(f"{file_path.name}[{i}]", f"malformed record ({exc})")
 
     if not normalized_records:
-        return 0
+        # Every record in this artifact failed to normalize. Previously
+        # this returned 0 with only a stderr print and no tracked failure
+        # — a file where every row was malformed still exited 0, and the
+        # orchestrator recorded the stage as "succeeded" while quietly
+        # losing that file's data. Now it's counted in result.failed.
+        return result
 
     written = write_records(conn, run_id, file_hash, normalized_records)
-    return written
+    result.ok(written)
+    return result
 
 
-def process_output_directory(db_url: str, run_id: str, output_dir: str) -> int:
+def process_output_directory(db_url: str, run_id: str, output_dir: str) -> ETLRunResult:
     out_path = Path(output_dir)
     artifacts = list_supported_artifacts(out_path)
     if not artifacts:
         raise FileNotFoundError(f"No supported iLEAPP artifact files were found under {out_path}")
 
+    result = ETLRunResult()
     conn = psycopg2.connect(db_url)
     try:
-        total = 0
         for artifact in artifacts:
-            total += process_artifact_file(conn, run_id, artifact)
+            try:
+                file_result = process_artifact_file(conn, run_id, artifact)
+            except Exception as exc:
+                # Per-file isolation (EXTRACTOR_CONTRACT.md #5): one
+                # unreadable/unparseable artifact must not abort the rest
+                # of the output directory. Previously unguarded — an
+                # exception from parse_artifact_file or ingest_file
+                # propagated straight out of this loop and stopped every
+                # artifact file after it, not just the bad one.
+                result.fail(artifact.name, exc)
+                continue
+            result = result.merge(file_result)
         conn.commit()
-        return total
+        return result
     finally:
         conn.close()
 
 
-def run_pipeline(artifact_path: str, output_dir: str, db_url: str, run_id: str | None = None) -> int:
+def run_pipeline(artifact_path: str, output_dir: str, db_url: str, run_id: str | None = None) -> ETLRunResult:
     out_path = Path(output_dir)
     run_id = run_id or __import__("uuid").uuid4().hex
 
@@ -159,9 +178,9 @@ def run_pipeline(artifact_path: str, output_dir: str, db_url: str, run_id: str |
     if extraction.get("status") != "success":
         raise RuntimeError(extraction.get("error") or "iLEAPP extraction failed without a detailed error")
 
-    total = process_output_directory(db_url, run_id, str(out_path))
-    print(f"[+] Persisted {total} iLEAPP record(s) to Postgres for run {run_id}.")
-    return total
+    result = process_output_directory(db_url, run_id, str(out_path))
+    print(f"[+] Persisted {result.succeeded} iLEAPP record(s) to Postgres for run {run_id}.")
+    return result
 
 
 def main() -> int:
@@ -180,11 +199,13 @@ def main() -> int:
         if args.clean and Path(args.output_dir).exists():
             import shutil
             shutil.rmtree(args.output_dir)
-        run_pipeline(args.backup_path, args.output_dir, args.db_url, run_id=args.run_id)
-        return 0
+        result = run_pipeline(args.backup_path, args.output_dir, args.db_url, run_id=args.run_id)
     except Exception as exc:
         print(f"[ileapp] extraction pipeline failed: {exc}", file=sys.stderr)
         return 1
+
+    result.print_summary("ileapp")
+    return result.exit_code
 
 
 if __name__ == "__main__":
