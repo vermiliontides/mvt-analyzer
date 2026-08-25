@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+#
+# Verichron Epoch — pre-commit guard against committing forensic output.
+#
+# Why this exists: .gitignore already documented that pipeline outputs can
+# contain real findings (browsing history, app usage, PII) from whatever
+# backup was last analyzed. That documentation was correct and was still
+# violated — epoch_forensics.db and correlation_report.md were committed
+# before the ignore rules existed, and .gitignore does not untrack files
+# that are already tracked. Intent needs enforcement, not just a comment.
+#
+# Install with:  git config core.hooksPath .githooks
+# (scripts/bootstrap-dev.sh does this for you.)
+#
+# Override for a genuinely-safe file:  ALLOW_FORENSIC_COMMIT=1 git commit ...
+
+set -euo pipefail
+
+# Patterns that must never be committed. Matched against staged paths.
+BLOCKED_PATTERNS=(
+  '\.db$'
+  '\.sqlite$'
+  '\.sqlite3$'
+  '_report\.md$'
+  '^correlation_report\.md$'
+  '^investigation_report\.md$'
+  '^comprehensive_forensic_report\.md$'
+  '(^|/)ileapp_raw_output/'
+  '(^|/)[^/]*_raw_output/'
+  '(^|/)mvt-workspace/'
+  '(^|/)results/'
+  '(^|/)decrypted/'
+  '\.plist$'
+  '\.ips$'
+)
+
+# Files that legitimately match a blocked pattern and are known-safe.
+ALLOWLIST=(
+  'docs/.*\.md$'
+)
+
+staged="$(git diff --cached --name-only --diff-filter=ACMR)"
+[ -z "$staged" ] && exit 0
+
+violations=()
+while IFS= read -r file; do
+  [ -z "$file" ] && continue
+
+  allowed=0
+  for allow in "${ALLOWLIST[@]}"; do
+    if printf '%s' "$file" | grep -qE "$allow"; then allowed=1; break; fi
+  done
+  [ "$allowed" -eq 1 ] && continue
+
+  for pattern in "${BLOCKED_PATTERNS[@]}"; do
+    if printf '%s' "$file" | grep -qE "$pattern"; then
+      violations+=("$file  (matched /$pattern/)")
+      break
+    fi
+  done
+done <<< "$staged"
+
+if [ "${#violations[@]}" -gt 0 ]; then
+  if [ "${ALLOW_FORENSIC_COMMIT:-0}" = "1" ]; then
+    echo "[pre-commit] WARNING: forensic-output guard bypassed via ALLOW_FORENSIC_COMMIT=1"
+    printf '[pre-commit]   %s\n' "${violations[@]}"
+    exit 0
+  fi
+
+  cat >&2 <<'EOF'
+
+[pre-commit] BLOCKED — refusing to commit files that may contain forensic output.
+
+These paths hold real findings extracted from a device backup: browsing
+history, message content, per-app network usage, account identifiers. Once
+committed they are recoverable from git history even after a later `git rm`,
+and removal from a remote is not the same as recall.
+
+EOF
+  printf '  %s\n' "${violations[@]}" >&2
+  cat >&2 <<'EOF'
+
+To resolve:
+  git restore --staged <file>        # unstage it
+  # then confirm it is covered by .gitignore
+
+If this file is genuinely safe (documentation, a synthetic fixture), either
+add it to ALLOWLIST in .githooks/pre-commit, or bypass once with:
+  ALLOW_FORENSIC_COMMIT=1 git commit ...
+
+EOF
+  exit 1
+fi
+
+exit 0
