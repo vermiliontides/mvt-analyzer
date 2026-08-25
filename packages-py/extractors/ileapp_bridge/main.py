@@ -20,7 +20,7 @@ _REPO_ROOT = _EXTRACTORS_DIR.parent.parent
 sys.path.insert(0, str(_EXTRACTORS_DIR))
 sys.path.insert(0, str(_REPO_ROOT / "packages-py" / "contracts"))
 
-from db_writer import ingest_file, write_records  # noqa: E402
+from db_writer import incomplete_ingests, ingest  # noqa: E402
 from etl_run import ETLRunResult  # noqa: E402
 from normalized_record import NormalizedRecord, SourceType  # noqa: E402
 
@@ -112,34 +112,82 @@ def process_artifact_file(conn, run_id: str, file_path: Path) -> ETLRunResult:
         return result  # nothing in this artifact — empty, not a failure
 
     summary = _summarize_raw_payload(file_path, records)
-    file_hash, already_ingested = ingest_file(
+
+    # One transaction per artifact: the ledger row, the raw payload summary and
+    # every normalized record commit together or not at all.
+    #
+    # This used to be ingest_file() (which committed on its own) followed by
+    # normalization and then write_records() (which committed again). The
+    # `if not normalized_records: return` branch below therefore left a
+    # committed ledger row with zero records, and since dedup keyed on that
+    # row's existence, every later run treated the artifact as already ingested
+    # and never retried it. An artifact whose rows were all malformed on one
+    # run was dropped permanently, even after the normalizer was fixed.
+    with ingest(
         conn,
         run_id,
         file_path,
         source_type=SourceType.ILEAPP_RECORD.value,
         raw_payload=summary,
-    )
-    if already_ingested:
-        return result
+    ) as unit:
+        if unit.already_ingested:
+            return result
 
-    normalized_records = []
-    for i, record in enumerate(records):
-        try:
-            normalized_records.append(normalize_record(record))
-        except Exception as exc:
-            result.fail(f"{file_path.name}[{i}]", f"malformed record ({exc})")
+        normalized_records = []
+        for i, record in enumerate(records):
+            try:
+                normalized_records.append(normalize_record(record))
+            except Exception as exc:
+                result.fail(f"{file_path.name}[{i}]", f"malformed record ({exc})")
 
-    if not normalized_records:
-        # Every record in this artifact failed to normalize. Previously
-        # this returned 0 with only a stderr print and no tracked failure
-        # — a file where every row was malformed still exited 0, and the
-        # orchestrator recorded the stage as "succeeded" while quietly
-        # losing that file's data. Now it's counted in result.failed.
-        return result
+        if not normalized_records:
+            # Every record in this artifact failed to normalize. Previously
+            # this returned 0 with only a stderr print and no tracked failure
+            # — a file where every row was malformed still exited 0, and the
+            # orchestrator recorded the stage as "succeeded" while quietly
+            # losing that file's data. Now it's counted in result.failed.
+            #
+            # Raising rather than returning matters for a second reason: a
+            # clean exit here would mark the ledger row complete with
+            # record_count = 0, making the skip permanent. The caller catches
+            # this per artifact, so isolation is unchanged.
+            raise ValueError(
+                f"all {len(records)} record(s) failed to normalize; "
+                f"{len(result.failures)} failure(s) recorded"
+            )
 
-    written = write_records(conn, run_id, file_hash, normalized_records)
-    result.ok(written)
+        result.ok(unit.write(normalized_records))
+
     return result
+
+
+def _warn_about_incomplete_ingests(conn) -> None:
+    """Surface ledger rows that were started and never finished.
+
+    Should be empty. Non-empty means either this process was hard-killed
+    mid-unit, or the rows predate the atomicity fix and the 0002 migration could
+    not tell whether they were legitimately empty or lost -- so it left them
+    incomplete to be retried. Either way an operator should see them, because
+    the whole failure mode being fixed here is one that never announced itself.
+    """
+    try:
+        stranded = incomplete_ingests(conn)
+    except Exception as exc:  # pragma: no cover - diagnostics must not fail a run
+        print(f"[ileapp] could not check for incomplete ingests: {exc}", file=sys.stderr)
+        return
+
+    if not stranded:
+        return
+
+    print(
+        f"[ileapp] {len(stranded)} file(s) have an incomplete ingest ledger entry "
+        "and will be retried on the next run:",
+        file=sys.stderr,
+    )
+    for file_hash, file_path in stranded[:20]:
+        print(f"[ileapp]   {file_hash[:12]}  {file_path}", file=sys.stderr)
+    if len(stranded) > 20:
+        print(f"[ileapp]   ... and {len(stranded) - 20} more", file=sys.stderr)
 
 
 def process_output_directory(db_url: str, run_id: str, output_dir: str) -> ETLRunResult:
@@ -164,7 +212,14 @@ def process_output_directory(db_url: str, run_id: str, output_dir: str) -> ETLRu
                 result.fail(artifact.name, exc)
                 continue
             result = result.merge(file_result)
-        conn.commit()
+
+        # No commit here. Each artifact's ingest() unit already committed its
+        # own transaction, which is the point: one unparseable artifact at the
+        # end of a large output directory must not be able to discard the
+        # artifacts that succeeded before it. The previous conn.commit() on
+        # this line was also decorative, since ingest_file() and
+        # write_records() had each already committed.
+        _warn_about_incomplete_ingests(conn)
         return result
     finally:
         conn.close()
