@@ -216,7 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
-extractors/*/__pycache__/
+packages-py/extractors/*/__pycache__/
 node_modules
 
 # Verichron Epoch: local pipeline outputs — these can contain real forensic
@@ -225,7 +225,6 @@ node_modules
 *.db
 *.sqlite
 *.sqlite3
-epoch_forensics.db
 correlation_report.md
 investigation_report.md
 ileapp_raw_output/
