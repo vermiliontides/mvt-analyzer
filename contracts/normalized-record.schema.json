@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://internal/contracts/normalized-record.schema.json",
   "title": "NormalizedForensicRecord",
-  "description": "The shared envelope every extractor (any language) must produce before writing to forensic_records. This file is the single source of truth — contracts/normalized_record.py (Pydantic) and contracts/normalizedRecord.ts (Zod) are both hand-kept in sync with it. If you change one, change all three in the same commit.",
+  "description": "The shared envelope every extractor (any language) must produce before writing to forensic_records. THIS FILE IS THE SINGLE SOURCE OF TRUTH. The language mirrors — packages-py/contracts/normalized_record.py (Pydantic) and packages-ts/contracts/normalizedRecord.ts (Zod) — have their source_type enum GENERATED from this file by scripts/sync_contracts.py. Do not hand-edit the enum in a mirror: add the value here and run `python3 scripts/sync_contracts.py --write`. CI runs `--check` and fails the build on drift. The previous version of this note asked contributors to 'change all three in the same commit' and pointed at two paths that do not exist; ileapp_record was added to both mirrors and not here, and nothing caught it.",
   "type": "object",
   "required": ["source_type", "fields"],
   "properties": {
@@ -12,7 +12,7 @@
     },
     "source_type": {
       "type": "string",
-      "description": "Which extractor produced this record. Add new values here FIRST when introducing a new extractor — this enum is the registration point.",
+      "description": "Which extractor produced this record. Add new values here FIRST when introducing a new extractor — this enum is the registration point, and the language mirrors are generated from it.",
       "enum": [
         "crash_report",
         "siri_feedback",
@@ -24,7 +24,8 @@
         "gcloud_log",
         "syslog_line",
         "mvt_ioc_detection",
-        "timestamp_anomaly"
+        "timestamp_anomaly",
+        "ileapp_record"
       ]
     },
     "event_time": {
