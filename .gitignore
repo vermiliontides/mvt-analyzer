@@ -222,12 +222,35 @@ node_modules
 # Verichron Epoch: local pipeline outputs — these can contain real forensic
 # findings (browsing history, app usage, PII) from whatever backup was last
 # analyzed. Never committed, regardless of which directory they land in.
+#
+# These rules are ENFORCED, not just documented: .githooks/pre-commit rejects
+# any staged path matching them, and CI fails any push that tracks one. See
+# SECURITY.md — a .gitignore entry does nothing for a file that is already
+# tracked, which is exactly how epoch_forensics.db and correlation_report.md
+# ended up in this repo's history.
 *.db
 *.sqlite
 *.sqlite3
+*_report.md
 correlation_report.md
 investigation_report.md
+comprehensive_forensic_report.md
 ileapp_raw_output/
 *_raw_output/
 workspace/
 mvt-workspace/
+results/
+decrypted/
+
+# Device artifacts — raw evidence, never source
+*.plist
+*.ips
+
+# Build output (TypeScript/Vite/Electron emit; sources are .ts/.tsx)
+dist/
+epoch/dist/
+epoch/main/*.js
+epoch/src/*.js
+
+# Logs
+automated_forensics.log
