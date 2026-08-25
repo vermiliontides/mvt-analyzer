@@ -53,7 +53,7 @@ _PACKAGES_PY = _EXTRACTORS_DIR.parent                      # packages-py
 
 sys.path.insert(0, str(_EXTRACTORS_DIR))
 sys.path.insert(0, str(_PACKAGES_PY / "contracts"))
-from db_writer import ingest_file, write_records  # noqa: E402
+from db_writer import ingest  # noqa: E402
 from normalized_record import NormalizedRecord, SourceType  # noqa: E402
 
 import psycopg2
@@ -147,41 +147,44 @@ def process_alerts(conn, run_id: str, results_dir: Path) -> tuple[int, int, list
     if not path.exists():
         return 0, 0, [f"{path.name}: not found — skipping detection ingest for this backup"]
 
-    file_hash, already = ingest_file(
-        conn, run_id, path, source_type=SourceType.MVT_IOC_DETECTION.value, raw_payload={},
-    )
-
     errors: list[str] = []
-    if already:
-        return 0, 0, []  # dedup: nothing new to write, not a failure
 
+    # The parse happens inside the transaction. Previously ingest_file()
+    # committed the ledger row first, so the `could not parse` return below left
+    # a committed row with zero records -- and dedup keyed on that row existing,
+    # so alerts.json was never re-read on any later run. A single malformed
+    # alerts.json permanently removed every mvt-ios detection from the evidence
+    # set while the stage kept reporting success.
     try:
-        alerts = json.loads(path.read_text())
+        with ingest(
+            conn,
+            run_id,
+            path,
+            source_type=SourceType.MVT_IOC_DETECTION.value,
+        ) as unit:
+            if unit.already_ingested:
+                return 0, 0, []  # dedup: a prior run finished this file
+
+            alerts = json.loads(path.read_text())
+
+            # The payload is only knowable after parsing. Same transaction now,
+            # rather than the old insert-{} / commit / parse / update / commit
+            # sequence that left a second window where the ledger disagreed
+            # with reality.
+            unit.set_raw_payload(alerts)
+
+            records = []
+            for i, alert in enumerate(alerts):
+                try:
+                    records.append(alert_to_record(alert))
+                except Exception as e:
+                    errors.append(f"{path.name}[{i}]: failed to normalize ({e})")
+
+            written = unit.write(records)
     except Exception as e:
-        return 0, 1, [f"{path.name}: could not parse ({e})"]
+        # Rolled back: no ledger row, so the next run retries this file.
+        return 0, 1, [f"{path.name}: could not ingest ({e})"]
 
-    # Backfill raw_payload now that we've parsed it, same two-step pattern
-    # extractors/crash/main.py uses — dedup is keyed correctly even if a
-    # later step fails.
-    try:
-        with conn.cursor() as cur:
-            import psycopg2.extras
-            cur.execute(
-                "UPDATE ingested_files SET raw_payload = %s WHERE file_hash = %s",
-                (psycopg2.extras.Json(alerts), file_hash),
-            )
-        conn.commit()
-    except Exception as e:
-        errors.append(f"{path.name}: could not store raw payload ({e})")
-
-    records = []
-    for i, alert in enumerate(alerts):
-        try:
-            records.append(alert_to_record(alert))
-        except Exception as e:
-            errors.append(f"{path.name}[{i}]: failed to normalize ({e})")
-
-    written = write_records(conn, run_id, file_hash, records)
     return written, len(errors), errors
 
 
@@ -267,17 +270,25 @@ def process_timeline(conn, run_id: str, results_dir: Path) -> tuple[int, int, li
                 continue
             anomalies.append(anomaly_to_record(ts, plugin, event, desc, backup_date))
 
-    file_hash, already = ingest_file(
-        conn,
-        run_id,
-        path,
-        source_type=SourceType.TIMESTAMP_ANOMALY.value,
-        raw_payload={"row_count": row_count, "plugin_counts": plugin_counts, "backup_date": backup_date.isoformat()},
-    )
-    if already:
-        return 0, 0, []
+    try:
+        with ingest(
+            conn,
+            run_id,
+            path,
+            source_type=SourceType.TIMESTAMP_ANOMALY.value,
+            raw_payload={
+                "row_count": row_count,
+                "plugin_counts": plugin_counts,
+                "backup_date": backup_date.isoformat(),
+            },
+        ) as unit:
+            if unit.already_ingested:
+                return 0, 0, []  # dedup: a prior run finished this file
+            written = unit.write(anomalies)
+    except Exception as e:
+        # Rolled back: no ledger row, so the next run retries this file.
+        return 0, 1, [f"{path.name}: could not ingest ({e})"]
 
-    written = write_records(conn, run_id, file_hash, anomalies)
     return written, 0, []
 
 
