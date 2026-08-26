@@ -1,0 +1,16 @@
+{
+  "name": "verichron-epoch",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "pnpm --recursive build",
+    "lint": "eslint .",
+    "typecheck": "pnpm --recursive typecheck"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "eslint": "^9.39.5",
+    "typescript": "^5.0.0",
+    "typescript-eslint": "^8.67.0"
+  }
+}

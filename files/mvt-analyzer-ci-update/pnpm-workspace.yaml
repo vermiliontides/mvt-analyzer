@@ -5,5 +5,4 @@ packages:
   - 'packages-ts/orchestrator/*'
 allowBuilds:
   electron: false
-  electron-winstaller: false
   esbuild: false
