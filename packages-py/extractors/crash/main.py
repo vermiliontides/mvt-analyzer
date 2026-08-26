@@ -35,7 +35,7 @@ _EXTRACTORS_DIR = Path(__file__).resolve().parent.parent
 _REPO_ROOT = _EXTRACTORS_DIR.parent
 sys.path.insert(0, str(_EXTRACTORS_DIR))               # db_writer.py lives here
 sys.path.insert(0, str(_REPO_ROOT / "contracts"))       # normalized_record.py lives here
-from db_writer import ingest_file, write_record  # noqa: E402
+from db_writer import ingest  # noqa: E402
 from etl_run import ETLRunResult  # noqa: E402
 from normalized_record import NormalizedRecord, SourceType  # noqa: E402
 
@@ -205,67 +205,53 @@ def run(conn, run_id: str, backup_path: str) -> ETLRunResult:
     or it contributes nothing — so partial-file-level failure can't
     produce a misleading row, and an all-or-nothing transaction would just
     throw away good data over one bad file.
+
+    One `ingest()` unit per .ips file (see db_writer.ingest): the ledger
+    row, the parsed raw_payload, and the file's single forensic_records
+    row all commit together or not at all. A parse failure raises out of
+    the `with` block, which rolls the whole unit back — no ledger row
+    survives a failed parse, so the file is retried (not silently
+    skipped-as-done) on the next run. This replaces an earlier version of
+    this function that committed the ledger row via a separate
+    `ingest_file()` call before parsing ran, which is exactly the
+    non-atomic pattern `ingest()` exists to close off (see db_writer.py's
+    module docstring).
     """
     ips_files = list(Path(backup_path).rglob("*.ips"))
     result = ETLRunResult()
 
     for file_path in ips_files:
         try:
-            # One transaction per .ips file. The parse happens INSIDE the unit,
-            # so a parse failure rolls the ledger row back and the file is
-            # retried on the next run.
-            #
-            # Previously the ledger row was committed before parse_ips_file ran
-            # and the `err` branch below did a bare `continue`. That left a
-            # committed ingested_files row with no records, and because dedup
-            # keyed on row existence, every later run reported the file as
-            # already ingested and counted it as a success. A crash report that
-            # failed to parse once was silently dropped from the evidence set
-            # permanently -- and this is the ordinary error path, not a rare
-            # interruption.
             with ingest(
                 conn,
                 run_id,
                 file_path,
                 source_type=SourceType.CRASH_REPORT.value,
-                raw_payload={},  # filled in below once we've parsed it
-            )
-        except Exception as e:
-            result.fail(file_path.name, f"could not ingest ({e})")
-            continue
+            ) as unit:
+                if unit.already_ingested:
+                    # A resumed run still counts an already-complete file as
+                    # succeeded: it IS successfully in the database, and
+                    # reporting it as merely skipped would make a resumed
+                    # run look like it had lost files relative to the first
+                    # pass. What must not happen is a second copy of the
+                    # records, which `already_ingested` guarantees here.
+                    result.ok()
+                    continue
 
-        if already_ingested:
-            result.ok()  # already present from a prior run — counts as done, not skipped-as-broken
-            continue
+                parsed, err = parse_ips_file(file_path)
+                if err:
+                    raise ValueError(err)
 
-        parsed, err = parse_ips_file(file_path)
-        if err:
-            result.fail(file_path.name, err)
-            continue
+                unit.set_raw_payload(parsed)
 
-        # Now that we have the real payload, backfill raw_payload with it
-        # (ingest_file already wrote the ingested_files row with {} above so
-        # dedup/idempotency is keyed correctly even if parsing fails on a
-        # later file; this second write just enriches that same row).
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE ingested_files SET raw_payload = %s WHERE file_hash = %s",
-                    (psycopg2.extras.Json(parsed), file_hash),
-                )
-            conn.commit()
-        except Exception as e:
-            result.fail(file_path.name, f"could not store raw payload ({e})")
-            continue
-
+                telemetry = extract_rich_telemetry(parsed)
+                telemetry["filename"] = file_path.name
                 unit.write_one(telemetry_to_record(telemetry))
-
-        try:
-            record = telemetry_to_record(telemetry)
-            write_record(conn, run_id, file_hash, record)
-            result.ok()
         except Exception as e:
-            result.fail(file_path.name, f"failed to write record ({e})")
+            result.fail(file_path.name, e)
+            continue
+
+        result.ok()
 
     return result
 

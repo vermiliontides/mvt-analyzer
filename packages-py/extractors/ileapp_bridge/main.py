@@ -131,6 +131,12 @@ def process_artifact_file(conn, run_id: str, file_path: Path) -> ETLRunResult:
         raw_payload=summary,
     ) as unit:
         if unit.already_ingested:
+            # A resumed run still counts an already-complete artifact as
+            # succeeded: it IS successfully in the database, just not
+            # newly-written by this run. Reporting it as neither would make
+            # a resumed run's summary look like it lost data relative to
+            # the first pass — same reasoning as extractors/crash/main.py.
+            result.ok()
             return result
 
         normalized_records = []

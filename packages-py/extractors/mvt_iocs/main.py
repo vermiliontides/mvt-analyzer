@@ -53,7 +53,7 @@ _PACKAGES_PY = _EXTRACTORS_DIR.parent                      # packages-py
 
 sys.path.insert(0, str(_EXTRACTORS_DIR))
 sys.path.insert(0, str(_PACKAGES_PY / "contracts"))
-from db_writer import ingest_file, write_records  # noqa: E402
+from db_writer import ingest  # noqa: E402
 from etl_run import ETLRunResult  # noqa: E402
 from normalized_record import NormalizedRecord, SourceType  # noqa: E402
 
@@ -144,24 +144,26 @@ def alert_to_record(alert: dict) -> NormalizedRecord:
 
 
 def process_alerts(conn, run_id: str, results_dir: Path) -> ETLRunResult:
+    """
+    One `ingest()` unit for the whole file (see db_writer.ingest): the
+    ledger row, the raw alerts.json payload, and every normalized
+    mvt_ioc_detection row commit together or not at all. A malformed
+    alerts.json (or a JSON-decode failure) raises out of the `with`
+    block, which rolls the ledger row back too — so the file is retried
+    on the next run instead of being permanently marked ingested with
+    zero detections, which is what happened when this used the older
+    ingest_file()-then-write_records() two-commit sequence.
+
+    Individual malformed *entries* inside an otherwise-valid alerts.json
+    are a different, narrower failure: one bad entry is recorded via
+    result.fail() and skipped, the rest of the file still ingests.
+    """
     result = ETLRunResult()
     path = results_dir / "alerts.json"
     if not path.exists():
         result.note(f"{path.name}: not found — skipping detection ingest for this backup")
         return result
 
-    file_hash, already = ingest_file(
-        conn, run_id, path, source_type=SourceType.MVT_IOC_DETECTION.value, raw_payload={},
-    )
-    if already:
-        return result  # dedup: nothing new to write, not a failure
-
-    # The parse happens inside the transaction. Previously ingest_file()
-    # committed the ledger row first, so the `could not parse` return below left
-    # a committed row with zero records -- and dedup keyed on that row existing,
-    # so alerts.json was never re-read on any later run. A single malformed
-    # alerts.json permanently removed every mvt-ios detection from the evidence
-    # set while the stage kept reporting success.
     try:
         with ingest(
             conn,
@@ -170,14 +172,9 @@ def process_alerts(conn, run_id: str, results_dir: Path) -> ETLRunResult:
             source_type=SourceType.MVT_IOC_DETECTION.value,
         ) as unit:
             if unit.already_ingested:
-                return 0, 0, []  # dedup: a prior run finished this file
+                return result  # dedup: a prior run already finished this file
 
             alerts = json.loads(path.read_text())
-
-            # The payload is only knowable after parsing. Same transaction now,
-            # rather than the old insert-{} / commit / parse / update / commit
-            # sequence that left a second window where the ledger disagreed
-            # with reality.
             unit.set_raw_payload(alerts)
 
             records = []
@@ -185,36 +182,14 @@ def process_alerts(conn, run_id: str, results_dir: Path) -> ETLRunResult:
                 try:
                     records.append(alert_to_record(alert))
                 except Exception as e:
-                    errors.append(f"{path.name}[{i}]: failed to normalize ({e})")
+                    result.fail(f"{path.name}[{i}]", e)
 
-            written = unit.write(records)
+            unit.write(records)
     except Exception as e:
-        result.fail(path.name, f"could not parse ({e})")
+        result.fail(path.name, f"could not ingest ({e})")
         return result
 
-    # Backfill raw_payload now that we've parsed it, same two-step pattern
-    # extractors/crash/main.py uses — dedup is keyed correctly even if a
-    # later step fails.
-    try:
-        with conn.cursor() as cur:
-            import psycopg2.extras
-            cur.execute(
-                "UPDATE ingested_files SET raw_payload = %s WHERE file_hash = %s",
-                (psycopg2.extras.Json(alerts), file_hash),
-            )
-        conn.commit()
-    except Exception as e:
-        result.fail(path.name, f"could not store raw payload ({e})")
-
-    records = []
-    for i, alert in enumerate(alerts):
-        try:
-            records.append(alert_to_record(alert))
-        except Exception as e:
-            result.fail(f"{path.name}[{i}]", f"failed to normalize ({e})")
-
-    written = write_records(conn, run_id, file_hash, records)
-    result.ok(written)
+    result.ok(len(records))
     return result
 
 
@@ -257,6 +232,17 @@ def anomaly_to_record(ts: datetime, plugin: str, event: str, desc: str, backup_d
 
 
 def process_timeline(conn, run_id: str, results_dir: Path) -> ETLRunResult:
+    """
+    Same atomicity guarantee as process_alerts: one `ingest()` unit covers
+    the ledger row, the row_count/plugin_counts summary raw_payload (see
+    the note below on why timeline.csv gets a summary instead of a full
+    dump), and every timestamp_anomaly row this pass finds. Previously
+    this scanned the whole CSV, then called ingest_file() and
+    write_records() as two separate commits — on a 250k-row timeline that
+    left a real window in which a crash after the ledger row committed
+    would permanently mark the file "ingested" with zero anomalies
+    recorded, reintroducing exactly the bug ingest() exists to close.
+    """
     result = ETLRunResult()
     path = results_dir / "timeline.csv"
     if not path.exists():
@@ -272,59 +258,70 @@ def process_timeline(conn, run_id: str, results_dir: Path) -> ETLRunResult:
         )
         return result
 
-    # timeline.csv is mvt's own already-parsed, already-JSON-safe artifact
-    # (one row per already-normalized event) — unlike a raw SQLite DB, a
-    # full-row raw_payload dump here doesn't lose anything a summary would,
-    # but at ~250k+ rows for a busy device it's not worth writing wholesale
-    # into a JSONB column. raw_payload stores summary metadata instead; the
-    # complete original row for every anomaly this stage finds is still
-    # fully preserved in that record's own `fields` — nothing is lost, it's
-    # just not duplicated in full alongside it. See README "raw_payload"
-    # for this documented deviation from the usual whole-file dump.
-    row_count = 0
-    plugin_counts: dict[str, int] = {}
-    anomalies: list[NormalizedRecord] = []
     cutoff = backup_date + ANOMALY_GRACE
 
-    with path.open(newline="", encoding="utf-8", errors="replace") as f:
-        reader = csv.reader(f)
-        next(reader, None)
-        for i, row in enumerate(reader):
-            if len(row) < 4:
-                continue
-            row_count += 1
-            ts_raw, plugin, event, desc = row[0], row[1], row[2], row[3]
-            plugin_counts[plugin] = plugin_counts.get(plugin, 0) + 1
+    try:
+        with ingest(
+            conn,
+            run_id,
+            path,
+            source_type=SourceType.TIMESTAMP_ANOMALY.value,
+        ) as unit:
+            if unit.already_ingested:
+                return result  # dedup: a prior run already finished this file
 
-            if plugin in FORWARD_LOOKING_PLUGINS:
-                continue
-            ts = parse_ts(ts_raw)
-            if ts is None or ts <= cutoff:
-                continue
+            # timeline.csv is mvt's own already-parsed, already-JSON-safe
+            # artifact (one row per already-normalized event) — unlike a
+            # raw SQLite DB, a full-row raw_payload dump here doesn't lose
+            # anything a summary would, but at ~250k+ rows for a busy
+            # device it's not worth writing wholesale into a JSONB
+            # column. raw_payload stores summary metadata instead; the
+            # complete original row for every anomaly this stage finds is
+            # still fully preserved in that record's own `fields` —
+            # nothing is lost, it's just not duplicated in full
+            # alongside it. See README "raw_payload" for this documented
+            # deviation from the usual whole-file dump.
+            row_count = 0
+            plugin_counts: dict[str, int] = {}
+            anomalies: list[NormalizedRecord] = []
 
-            # Per-row isolation (EXTRACTOR_CONTRACT.md #5): one malformed
-            # row must not take down the rest of a timeline that can run
-            # past 250k rows. Previously unguarded — a single bad row here
-            # raised straight out of this loop and was only caught by
-            # main()'s broad except, aborting the entire timeline pass
-            # (including every anomaly already found in earlier rows).
-            try:
-                anomalies.append(anomaly_to_record(ts, plugin, event, desc, backup_date))
-            except Exception as e:
-                result.fail(f"{path.name}[row {i}]", f"failed to build anomaly record ({e})")
+            with path.open(newline="", encoding="utf-8", errors="replace") as f:
+                reader = csv.reader(f)
+                next(reader, None)
+                for i, row in enumerate(reader):
+                    if len(row) < 4:
+                        continue
+                    row_count += 1
+                    ts_raw, plugin, event, desc = row[0], row[1], row[2], row[3]
+                    plugin_counts[plugin] = plugin_counts.get(plugin, 0) + 1
 
-    file_hash, already = ingest_file(
-        conn,
-        run_id,
-        path,
-        source_type=SourceType.TIMESTAMP_ANOMALY.value,
-        raw_payload={"row_count": row_count, "plugin_counts": plugin_counts, "backup_date": backup_date.isoformat()},
-    )
-    if already:
+                    if plugin in FORWARD_LOOKING_PLUGINS:
+                        continue
+                    ts = parse_ts(ts_raw)
+                    if ts is None or ts <= cutoff:
+                        continue
+
+                    # Per-row isolation (EXTRACTOR_CONTRACT.md #5): one
+                    # malformed row must not take down the rest of a
+                    # timeline that can run past 250k rows.
+                    try:
+                        anomalies.append(anomaly_to_record(ts, plugin, event, desc, backup_date))
+                    except Exception as e:
+                        result.fail(f"{path.name}[row {i}]", e)
+
+            unit.set_raw_payload(
+                {
+                    "row_count": row_count,
+                    "plugin_counts": plugin_counts,
+                    "backup_date": backup_date.isoformat(),
+                }
+            )
+            unit.write(anomalies)
+    except Exception as e:
+        result.fail(path.name, f"could not ingest ({e})")
         return result
 
-    written = write_records(conn, run_id, file_hash, anomalies)
-    result.ok(written)
+    result.ok(len(anomalies))
     return result
 
 

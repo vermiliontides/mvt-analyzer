@@ -28,12 +28,18 @@ extractors/mvt_iocs/ processing alerts.json and timeline.csv separately,
 per EXTRACTOR_CONTRACT.md #5's multi-input rule) build one ETLRunResult
 per input and combine them with merge() before deciding the stage's exit
 code — one missing/malformed input still doesn't block the other.
+
+`fail()`, `ok()`, and `note()` all return `self`, so a caller can either
+chain (`ETLRunResult().ok(5)`) or call them as plain statements across a
+loop — both styles are used across the extractors and neither should be
+penalized.
 """
 
 from __future__ import annotations
 
 import sys
 from dataclasses import dataclass, field
+from typing import IO
 
 
 @dataclass
@@ -46,40 +52,80 @@ class ETLRunResult:
     should call ok() once per item, not once per row, so the printed
     summary answers "how many things did I process" rather than "how many
     rows exist," which is what a reader actually wants after a run.
+
+    `failures` stores structured `(item_label, reason)` pairs rather than
+    pre-joined strings. This matters for exceptions specifically:
+    `str(KeyError("timestamp"))` renders as `"'timestamp'"` with the
+    exception type silently dropped, which is exactly the detail someone
+    debugging a stage failure needs. `fail()` renders `BaseException`
+    arguments as `f"{type(e).__name__}: {e}"` so the type survives into
+    the stored reason and into every rendering of it (print_summary,
+    pipeline_stage_status.error_message, a future structured-log sink)
+    without each caller having to remember to do it themselves.
     """
 
     succeeded: int = 0
     failed: int = 0
-    errors: list[str] = field(default_factory=list)
+    failures: list[tuple[str, str]] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
-    def ok(self, count: int = 1) -> None:
-        """Record `count` items that completed successfully."""
-        self.succeeded += count
+    def ok(self, count: int = 1) -> "ETLRunResult":
+        """Record `count` items that completed successfully.
 
-    def fail(self, item_label: str, error: BaseException | str) -> None:
+        Rejects a negative count rather than silently letting `succeeded`
+        go negative — that's not a partial result, it's a caller bug, and
+        it's cheaper to catch here than to explain a nonsensical summary
+        line later.
+        """
+        if count < 0:
+            raise ValueError(f"ok() count must be >= 0, got {count}")
+        self.succeeded += count
+        return self
+
+    def fail(self, item_label: str, error: BaseException | str) -> "ETLRunResult":
         """Record one failed item. `item_label` should identify the
         specific item (filename, alert index, table name) so the printed
-        error is actionable without re-running with more logging."""
-        self.failed += 1
-        self.errors.append(f"{item_label}: {error}")
+        error is actionable without re-running with more logging.
 
-    def note(self, message: str) -> None:
+        `error` may be a plain string (an extractor's own description of
+        what went wrong) or an exception (rendered with its type name so
+        the exception class isn't lost, see the class docstring)."""
+        reason = error if isinstance(error, str) else f"{type(error).__name__}: {error}"
+        self.failed += 1
+        self.failures.append((item_label, reason))
+        return self
+
+    def note(self, message: str) -> "ETLRunResult":
         """Record an informational message that should be surfaced but
         must NOT affect exit_code — e.g. an optional input file (like
         mvt_iocs's alerts.json) simply wasn't present for this backup.
         Distinct from fail(): a note is expected-and-handled, not a
         partial failure of the stage."""
         self.notes.append(message)
+        return self
 
     def merge(self, other: "ETLRunResult") -> "ETLRunResult":
         """Combines two independently-tracked runs into one for a single
         exit-code decision. Used when a stage processes more than one
-        input file/source independently (EXTRACTOR_CONTRACT.md #5)."""
+        input file/source independently (EXTRACTOR_CONTRACT.md #5).
+
+        Returns a new, independent ETLRunResult — neither `self` nor
+        `other` is mutated, so accumulating in a loop (`acc = acc.merge(
+        next_result)`) can't accidentally alias the accumulator to
+        whatever it was just merged with.
+
+        Raises TypeError for anything that isn't an ETLRunResult, rather
+        than failing later with an opaque AttributeError on `.succeeded`
+        against whatever the caller actually passed.
+        """
+        if not isinstance(other, ETLRunResult):
+            raise TypeError(
+                f"ETLRunResult.merge() expects another ETLRunResult, got {type(other).__name__}"
+            )
         return ETLRunResult(
             succeeded=self.succeeded + other.succeeded,
             failed=self.failed + other.failed,
-            errors=[*self.errors, *other.errors],
+            failures=[*self.failures, *other.failures],
             notes=[*self.notes, *other.notes],
         )
 
@@ -92,14 +138,48 @@ class ETLRunResult:
         in the same run."""
         return 1 if self.failed else 0
 
-    def print_summary(self, tag: str) -> None:
-        """The `[tag] N succeeded, M failed` line plus per-error/per-note
-        stderr dump every extractor's main() used to print by hand.
+    def __bool__(self) -> bool:
+        """Truthy iff nothing failed, mirroring `exit_code == 0`. Lets a
+        caller write `if not result: ...` instead of `if result.failed:
+        ...` at call sites that just want a pass/fail read."""
+        return self.failed == 0
+
+    # Itemized failures beyond this many are counted but not printed
+    # individually — a malformed 250k-row timeline.csv can fail every row,
+    # and dumping all of them would bury the one number that actually
+    # matters (how many) under a wall of identical-looking lines.
+    _MAX_ITEMIZED_FAILURES = 20
+
+    def print_summary(self, tag: str, stream: "IO[str] | None" = None) -> None:
+        """Prints the run summary and, if anything needs attention, the
+        detail behind it.
+
         `tag` is the extractor's bracketed log prefix (e.g. "crash",
         "mvt_iocs") so output stays consistent with everything else that
-        extractor already prints."""
-        print(f"[{tag}] {self.succeeded} succeeded, {self.failed} failed")
+        extractor already prints.
+
+        By default the one-line summary goes to stdout and everything
+        else (notes, itemized failures) goes to stderr — that split
+        matters operationally: the orchestrator captures a stage's
+        stderr as `pipeline_stage_status.error_message`, which is what
+        `generate_report.py` renders, so failure detail printed only to
+        stdout would never reach the report. Pass an explicit `stream` to
+        send everything to one destination instead (e.g. for capturing
+        combined output in a test or a log line).
+        """
+        summary_stream = stream if stream is not None else sys.stdout
+        detail_stream = stream if stream is not None else sys.stderr
+
+        print(f"[{tag}] wrote {self.succeeded} record(s), {self.failed} unit(s) failed", file=summary_stream)
+
         for msg in self.notes:
-            print(f"[{tag}]   {msg}", file=sys.stderr)
-        for err in self.errors:
-            print(f"[{tag}]   {err}", file=sys.stderr)
+            print(f"[{tag}]   {msg}", file=detail_stream)
+
+        if self.failures:
+            print(f"[{tag}] {len(self.failures)} failure(s):", file=detail_stream)
+            shown = self.failures[: self._MAX_ITEMIZED_FAILURES]
+            for label, reason in shown:
+                print(f"[{tag}]   {label}: {reason}", file=detail_stream)
+            remaining = len(self.failures) - len(shown)
+            if remaining > 0:
+                print(f"[{tag}]   ... and {remaining} more (truncated)", file=detail_stream)
