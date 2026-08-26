@@ -1,14 +1,15 @@
 {
-  "name": "orchestrator",
+  "name": "@verichron/main-orchestrator",
   "version": "0.1.0",
   "description": "Conductor for the forensic investigation pipeline. See /docs/architecture.md.",
   "type": "module",
   "scripts": {
-    "investigate": "tsx main.ts"
+    "investigate": "tsx main.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "pg": "^8.11.0",
-    "zod": "^4.4.3"
+    "pg": "^8.11.0"
   },
   "devDependencies": {
     "tsx": "^4.7.0",

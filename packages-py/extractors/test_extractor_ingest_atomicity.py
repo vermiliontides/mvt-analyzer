@@ -59,11 +59,11 @@ def test_unparseable_ips_file_is_reported_failed_and_left_retryable(db, tmp_path
     bad = tmp_path / "broken.ips"
     bad.write_text("this is not an ips file")
 
-    succeeded, failed, errors = crash_main.run(db, RUN_ID, str(tmp_path))
+    result = crash_main.run(db, RUN_ID, str(tmp_path))
 
-    assert succeeded == 0
-    assert failed == 1
-    assert errors, "a parse failure must be surfaced, not swallowed"
+    assert result.succeeded == 0
+    assert result.failed == 1
+    assert result.failures, "a parse failure must be surfaced, not swallowed"
 
     assert db.ledger() == [], (
         "an unparseable .ips left a ledger row, so every later run would skip it "
@@ -79,10 +79,10 @@ def test_one_bad_ips_file_does_not_prevent_the_good_ones(db, tmp_path):
     good = _valid_ips()
     (tmp_path / "good.ips").write_text(good)
 
-    succeeded, failed, _ = crash_main.run(db, RUN_ID, str(tmp_path))
+    result = crash_main.run(db, RUN_ID, str(tmp_path))
 
-    assert failed == 1
-    assert succeeded == 1
+    assert result.failed == 1
+    assert result.succeeded == 1
     ledger = db.ledger()
     assert len(ledger) == 1, "only the file that parsed should be in the ledger"
     assert ledger[0]["file_name"] == "good.ips"
@@ -94,15 +94,15 @@ def test_a_previously_failed_ips_file_is_retried_on_the_next_run(db, tmp_path):
     target = tmp_path / "evidence.ips"
     target.write_text("garbage")
 
-    _, failed, _ = crash_main.run(db, RUN_ID, str(tmp_path))
-    assert failed == 1
+    first = crash_main.run(db, RUN_ID, str(tmp_path))
+    assert first.failed == 1
 
     # The file is repaired (or was truncated mid-copy the first time).
     target.write_text(_valid_ips())
 
-    succeeded, failed, _ = crash_main.run(db, RETRY_RUN_ID, str(tmp_path))
-    assert failed == 0
-    assert succeeded == 1, "the retried file must actually be ingested, not skipped"
+    retry = crash_main.run(db, RETRY_RUN_ID, str(tmp_path))
+    assert retry.failed == 0
+    assert retry.succeeded == 1, "the retried file must actually be ingested, not skipped"
     assert db.record_count() == 1
 
 
@@ -114,10 +114,10 @@ def test_a_successful_ips_file_is_deduped_not_duplicated(db, tmp_path):
     (tmp_path / "good.ips").write_text(_valid_ips())
 
     crash_main.run(db, RUN_ID, str(tmp_path))
-    succeeded, failed, _ = crash_main.run(db, RETRY_RUN_ID, str(tmp_path))
+    retry = crash_main.run(db, RETRY_RUN_ID, str(tmp_path))
 
-    assert failed == 0
-    assert succeeded == 1
+    assert retry.failed == 0
+    assert retry.succeeded == 1
     assert db.record_count() == 1, "dedup must not duplicate evidence"
     assert len(db.ledger()) == 1
     assert db.ledger()[0]["run_id"] == RUN_ID, "the original ingest run is preserved"
@@ -144,11 +144,11 @@ def _valid_ips() -> str:
 def test_unparseable_alerts_json_is_reported_failed_and_left_retryable(db, tmp_path):
     (tmp_path / "alerts.json").write_text("{ not valid json")
 
-    succeeded, failed, errors = mvt_main.process_alerts(db, RUN_ID, tmp_path)
+    result = mvt_main.process_alerts(db, RUN_ID, tmp_path)
 
-    assert succeeded == 0
-    assert failed == 1
-    assert errors
+    assert result.succeeded == 0
+    assert result.failed == 1
+    assert result.failures
     assert db.ledger() == [], (
         "a malformed alerts.json left a ledger row, so the MVT detections for "
         "this backup would never be ingested by any later run"
@@ -161,9 +161,9 @@ def test_repaired_alerts_json_is_ingested_on_retry(db, tmp_path):
     mvt_main.process_alerts(db, RUN_ID, tmp_path)
 
     alerts.write_text(json.dumps([]))
-    succeeded, failed, _ = mvt_main.process_alerts(db, RETRY_RUN_ID, tmp_path)
+    result = mvt_main.process_alerts(db, RETRY_RUN_ID, tmp_path)
 
-    assert failed == 0
+    assert result.failed == 0
     assert db.ledger(), "the retried file should now be recorded"
     assert db.ledger()[0]["ingest_complete"] == 1
 
@@ -173,24 +173,24 @@ def test_empty_alerts_json_completes_rather_than_retrying_forever(db, tmp_path):
     ingest with record_count = 0, not an unfinished one."""
     (tmp_path / "alerts.json").write_text(json.dumps([]))
 
-    succeeded, failed, _ = mvt_main.process_alerts(db, RUN_ID, tmp_path)
-    assert failed == 0
+    result = mvt_main.process_alerts(db, RUN_ID, tmp_path)
+    assert result.failed == 0
 
     row = db.ledger()[0]
     assert row["ingest_complete"] == 1
     assert row["record_count"] == 0
 
     # Second run must treat it as done.
-    succeeded, failed, _ = mvt_main.process_alerts(db, RETRY_RUN_ID, tmp_path)
-    assert failed == 0
-    assert succeeded == 0
+    retry = mvt_main.process_alerts(db, RETRY_RUN_ID, tmp_path)
+    assert retry.failed == 0
+    assert retry.succeeded == 0
     assert len(db.ledger()) == 1
 
 
 def test_missing_alerts_json_is_not_a_failure(db, tmp_path):
     """No alerts.json at all means mvt did not produce one; that is a skip, and
     it must not create a ledger row for a file that does not exist."""
-    succeeded, failed, errors = mvt_main.process_alerts(db, RUN_ID, tmp_path)
+    result = mvt_main.process_alerts(db, RUN_ID, tmp_path)
 
-    assert (succeeded, failed) == (0, 0)
+    assert (result.succeeded, result.failed) == (0, 0)
     assert db.ledger() == []

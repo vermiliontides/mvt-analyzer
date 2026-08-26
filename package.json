@@ -1,6 +1,7 @@
 {
   "name": "verichron-epoch",
   "private": true,
+  "type": "module",
   "scripts": {
     "build": "pnpm --recursive build",
     "lint": "eslint .",
