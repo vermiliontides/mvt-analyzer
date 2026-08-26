@@ -1,13 +1,13 @@
-
 import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
-
+ 
 export default tseslint.config(
   // Global ignores to keep linting out of build artifacts and Python directories
   {
     ignores: [
       '**/node_modules/**',
       '**/dist/**',
+      '**/main-dist/**',
       '**/build/**',
       '**/.venv/**',
       '**/py-packages/**'

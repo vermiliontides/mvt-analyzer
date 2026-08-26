@@ -53,7 +53,8 @@ _PACKAGES_PY = _EXTRACTORS_DIR.parent                      # packages-py
 
 sys.path.insert(0, str(_EXTRACTORS_DIR))
 sys.path.insert(0, str(_PACKAGES_PY / "contracts"))
-from db_writer import ingest  # noqa: E402
+from db_writer import ingest_file, write_records  # noqa: E402
+from etl_run import ETLRunResult  # noqa: E402
 from normalized_record import NormalizedRecord, SourceType  # noqa: E402
 
 import psycopg2
@@ -142,12 +143,18 @@ def alert_to_record(alert: dict) -> NormalizedRecord:
     )
 
 
-def process_alerts(conn, run_id: str, results_dir: Path) -> tuple[int, int, list[str]]:
+def process_alerts(conn, run_id: str, results_dir: Path) -> ETLRunResult:
+    result = ETLRunResult()
     path = results_dir / "alerts.json"
     if not path.exists():
-        return 0, 0, [f"{path.name}: not found — skipping detection ingest for this backup"]
+        result.note(f"{path.name}: not found — skipping detection ingest for this backup")
+        return result
 
-    errors: list[str] = []
+    file_hash, already = ingest_file(
+        conn, run_id, path, source_type=SourceType.MVT_IOC_DETECTION.value, raw_payload={},
+    )
+    if already:
+        return result  # dedup: nothing new to write, not a failure
 
     # The parse happens inside the transaction. Previously ingest_file()
     # committed the ledger row first, so the `could not parse` return below left
@@ -182,10 +189,33 @@ def process_alerts(conn, run_id: str, results_dir: Path) -> tuple[int, int, list
 
             written = unit.write(records)
     except Exception as e:
-        # Rolled back: no ledger row, so the next run retries this file.
-        return 0, 1, [f"{path.name}: could not ingest ({e})"]
+        result.fail(path.name, f"could not parse ({e})")
+        return result
 
-    return written, len(errors), errors
+    # Backfill raw_payload now that we've parsed it, same two-step pattern
+    # extractors/crash/main.py uses — dedup is keyed correctly even if a
+    # later step fails.
+    try:
+        with conn.cursor() as cur:
+            import psycopg2.extras
+            cur.execute(
+                "UPDATE ingested_files SET raw_payload = %s WHERE file_hash = %s",
+                (psycopg2.extras.Json(alerts), file_hash),
+            )
+        conn.commit()
+    except Exception as e:
+        result.fail(path.name, f"could not store raw payload ({e})")
+
+    records = []
+    for i, alert in enumerate(alerts):
+        try:
+            records.append(alert_to_record(alert))
+        except Exception as e:
+            result.fail(f"{path.name}[{i}]", f"failed to normalize ({e})")
+
+    written = write_records(conn, run_id, file_hash, records)
+    result.ok(written)
+    return result
 
 
 # --- timeline.csv -> timestamp_anomaly ---------------------------------
@@ -226,18 +256,21 @@ def anomaly_to_record(ts: datetime, plugin: str, event: str, desc: str, backup_d
     )
 
 
-def process_timeline(conn, run_id: str, results_dir: Path) -> tuple[int, int, list[str]]:
+def process_timeline(conn, run_id: str, results_dir: Path) -> ETLRunResult:
+    result = ETLRunResult()
     path = results_dir / "timeline.csv"
     if not path.exists():
-        return 0, 0, [f"{path.name}: not found — skipping timestamp-anomaly check for this backup"]
+        result.note(f"{path.name}: not found — skipping timestamp-anomaly check for this backup")
+        return result
 
     backup_date = get_backup_date(results_dir)
     if backup_date is None:
-        return 0, 1, [
-            f"could not determine backup date from backup_info.json — "
-            f"skipping timestamp-anomaly check (this is the one thing this "
-            f"check needs that isn't self-contained in timeline.csv)"
-        ]
+        result.fail(
+            "backup_info.json",
+            "could not determine backup date — skipping timestamp-anomaly check "
+            "(this is the one thing this check needs that isn't self-contained in timeline.csv)",
+        )
+        return result
 
     # timeline.csv is mvt's own already-parsed, already-JSON-safe artifact
     # (one row per already-normalized event) — unlike a raw SQLite DB, a
@@ -256,7 +289,7 @@ def process_timeline(conn, run_id: str, results_dir: Path) -> tuple[int, int, li
     with path.open(newline="", encoding="utf-8", errors="replace") as f:
         reader = csv.reader(f)
         next(reader, None)
-        for row in reader:
+        for i, row in enumerate(reader):
             if len(row) < 4:
                 continue
             row_count += 1
@@ -268,28 +301,31 @@ def process_timeline(conn, run_id: str, results_dir: Path) -> tuple[int, int, li
             ts = parse_ts(ts_raw)
             if ts is None or ts <= cutoff:
                 continue
-            anomalies.append(anomaly_to_record(ts, plugin, event, desc, backup_date))
 
-    try:
-        with ingest(
-            conn,
-            run_id,
-            path,
-            source_type=SourceType.TIMESTAMP_ANOMALY.value,
-            raw_payload={
-                "row_count": row_count,
-                "plugin_counts": plugin_counts,
-                "backup_date": backup_date.isoformat(),
-            },
-        ) as unit:
-            if unit.already_ingested:
-                return 0, 0, []  # dedup: a prior run finished this file
-            written = unit.write(anomalies)
-    except Exception as e:
-        # Rolled back: no ledger row, so the next run retries this file.
-        return 0, 1, [f"{path.name}: could not ingest ({e})"]
+            # Per-row isolation (EXTRACTOR_CONTRACT.md #5): one malformed
+            # row must not take down the rest of a timeline that can run
+            # past 250k rows. Previously unguarded — a single bad row here
+            # raised straight out of this loop and was only caught by
+            # main()'s broad except, aborting the entire timeline pass
+            # (including every anomaly already found in earlier rows).
+            try:
+                anomalies.append(anomaly_to_record(ts, plugin, event, desc, backup_date))
+            except Exception as e:
+                result.fail(f"{path.name}[row {i}]", f"failed to build anomaly record ({e})")
 
-    return written, 0, []
+    file_hash, already = ingest_file(
+        conn,
+        run_id,
+        path,
+        source_type=SourceType.TIMESTAMP_ANOMALY.value,
+        raw_payload={"row_count": row_count, "plugin_counts": plugin_counts, "backup_date": backup_date.isoformat()},
+    )
+    if already:
+        return result
+
+    written = write_records(conn, run_id, file_hash, anomalies)
+    result.ok(written)
+    return result
 
 
 # --- main ----------------------------------------------------------------
@@ -320,20 +356,9 @@ def main():
         print(f"[mvt_iocs] could not connect to database: {e}", file=sys.stderr)
         sys.exit(1)
 
-    total_written = 0
-    total_failed = 0
-    all_errors: list[str] = []
-
     try:
-        w, f, errs = process_alerts(conn, args.run_id, results_dir)
-        total_written += w
-        total_failed += f
-        all_errors += errs
-
-        w, f, errs = process_timeline(conn, args.run_id, results_dir)
-        total_written += w
-        total_failed += f
-        all_errors += errs
+        alerts_result = process_alerts(conn, args.run_id, results_dir)
+        timeline_result = process_timeline(conn, args.run_id, results_dir)
     except Exception as e:
         print(f"[mvt_iocs] unhandled error: {e}", file=sys.stderr)
         conn.close()
@@ -341,11 +366,9 @@ def main():
     finally:
         conn.close()
 
-    print(f"[mvt_iocs] {total_written} record(s) written, {total_failed} issue(s)")
-    for e in all_errors:
-        print(f"[mvt_iocs]   {e}", file=sys.stderr)
-
-    sys.exit(1 if total_failed else 0)
+    result = alerts_result.merge(timeline_result)
+    result.print_summary("mvt_iocs")
+    sys.exit(result.exit_code)
 
 
 if __name__ == "__main__":

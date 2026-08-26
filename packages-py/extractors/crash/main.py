@@ -35,7 +35,8 @@ _EXTRACTORS_DIR = Path(__file__).resolve().parent.parent
 _REPO_ROOT = _EXTRACTORS_DIR.parent
 sys.path.insert(0, str(_EXTRACTORS_DIR))               # db_writer.py lives here
 sys.path.insert(0, str(_REPO_ROOT / "contracts"))       # normalized_record.py lives here
-from db_writer import ingest  # noqa: E402
+from db_writer import ingest_file, write_record  # noqa: E402
+from etl_run import ETLRunResult  # noqa: E402
 from normalized_record import NormalizedRecord, SourceType  # noqa: E402
 
 import psycopg2
@@ -195,10 +196,8 @@ def telemetry_to_record(telemetry: dict) -> NormalizedRecord:
 # --- main --------------------------------------------------------------
 
 
-def run(conn, run_id: str, backup_path: str) -> tuple[int, int, list[str]]:
+def run(conn, run_id: str, backup_path: str) -> ETLRunResult:
     """
-    Returns (succeeded_count, failed_count, error_summaries).
-
     Partial-failure choice (per EXTRACTOR_CONTRACT.md #5): a malformed or
     unparseable .ips file is skipped and logged, everything else still
     gets written. Nothing here mixes trustworthy and untrustworthy data
@@ -208,9 +207,7 @@ def run(conn, run_id: str, backup_path: str) -> tuple[int, int, list[str]]:
     throw away good data over one bad file.
     """
     ips_files = list(Path(backup_path).rglob("*.ips"))
-    succeeded = 0
-    failed = 0
-    errors: list[str] = []
+    result = ETLRunResult()
 
     for file_path in ips_files:
         try:
@@ -231,39 +228,46 @@ def run(conn, run_id: str, backup_path: str) -> tuple[int, int, list[str]]:
                 run_id,
                 file_path,
                 source_type=SourceType.CRASH_REPORT.value,
-            ) as unit:
-                if unit.already_ingested:
-                    # A prior run FINISHED this file (not merely started it).
-                    # Counts as done, not skipped-as-broken.
-                    succeeded += 1
-                    continue
+                raw_payload={},  # filled in below once we've parsed it
+            )
+        except Exception as e:
+            result.fail(file_path.name, f"could not ingest ({e})")
+            continue
 
-                parsed, err = parse_ips_file(file_path)
-                if err:
-                    # Raise rather than `continue`: leaving the block normally
-                    # would commit a complete ledger row claiming this file
-                    # produced zero records, which is the very state that made
-                    # the loss permanent. The raise is caught below, so
-                    # per-file isolation is preserved.
-                    raise ValueError(err)
+        if already_ingested:
+            result.ok()  # already present from a prior run — counts as done, not skipped-as-broken
+            continue
 
-                # The payload is only knowable after parsing. Inside the unit
-                # this is part of the same transaction, replacing the old
-                # insert-{}-commit-parse-update-commit dance that left a second
-                # window where the ledger was wrong.
-                unit.set_raw_payload(parsed)
+        parsed, err = parse_ips_file(file_path)
+        if err:
+            result.fail(file_path.name, err)
+            continue
 
-                telemetry = extract_rich_telemetry(parsed)
-                telemetry["filename"] = file_path.name
+        # Now that we have the real payload, backfill raw_payload with it
+        # (ingest_file already wrote the ingested_files row with {} above so
+        # dedup/idempotency is keyed correctly even if parsing fails on a
+        # later file; this second write just enriches that same row).
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE ingested_files SET raw_payload = %s WHERE file_hash = %s",
+                    (psycopg2.extras.Json(parsed), file_hash),
+                )
+            conn.commit()
+        except Exception as e:
+            result.fail(file_path.name, f"could not store raw payload ({e})")
+            continue
 
                 unit.write_one(telemetry_to_record(telemetry))
 
-            succeeded += 1
+        try:
+            record = telemetry_to_record(telemetry)
+            write_record(conn, run_id, file_hash, record)
+            result.ok()
         except Exception as e:
-            failed += 1
-            errors.append(f"{file_path.name}: {e}")
+            result.fail(file_path.name, f"failed to write record ({e})")
 
-    return succeeded, failed, errors
+    return result
 
 
 def main():
@@ -289,20 +293,15 @@ def main():
         sys.exit(1)
 
     try:
-        succeeded, failed, errors = run(conn, args.run_id, args.backup_path)
+        result = run(conn, args.run_id, args.backup_path)
     except Exception as e:
         print(f"[crash] unhandled error: {e}", file=sys.stderr)
         sys.exit(1)
     finally:
         conn.close()
 
-    print(f"[crash] {succeeded} record(s) written, {failed} file(s) failed")
-    if errors:
-        for e in errors:
-            print(f"[crash]   {e}", file=sys.stderr)
-        sys.exit(1)
-
-    sys.exit(0)
+    result.print_summary("crash")
+    sys.exit(result.exit_code)
 
 
 if __name__ == "__main__":

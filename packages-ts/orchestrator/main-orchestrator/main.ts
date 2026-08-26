@@ -34,15 +34,14 @@
  * orchestrator guessing.
  *
  * Python interpreter resolution: every stage below is a Python subprocess.
- * We resolve <repo-root>/.venv/bin/python once at startup (mirroring
- * orchestrator/src/index.ts, which already does this for the iLEAPP-only
- * orchestrator) rather than spawning bare "python3" per stage. A bare
- * "python3" on PATH is not guaranteed to be the project's virtualenv —
+ * We resolve <repo-root>/.venv/bin/python once at startup rather than
+ * spawning bare "python3" per stage. A bare "python3" on PATH is not
+ * guaranteed to be the project's virtualenv —
  * on a dev machine with both a system Python and a project venv, every
  * stage would fail with ModuleNotFoundError: psycopg2, and nothing about
  * that error would point back at "wrong interpreter" as the cause.
  */
-
+ 
 import { spawn } from "node:child_process";
 import { Client } from "pg";
 import { randomUUID } from "node:crypto";
@@ -50,23 +49,23 @@ import { parseArgs } from "node:util";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-
+ 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
+ 
 // This file lives at packages-ts/orchestrator/main-orchestrator/main.ts, so
 // repo root is three levels up — same computation resolvePythonBin() below
 // uses for the venv interpreter.
 const REPO_ROOT = path.resolve(__dirname, "../../../");
 const PACKAGES_PY = path.join(REPO_ROOT, "packages-py");
-
+ 
 interface StageDefinition {
   name: string;
   /** Executable + args to invoke this stage. Extends with --run-id/--backup-path/--results-path/--db-url at call time. */
   command: string;
   args: string[];
 }
-
+ 
 // TODO: fill in real entrypoints as each extractor is added under /extractors.
 // Order matters only in that "report" must run last — extractors themselves
 // are independent and could run concurrently later if that ever becomes a
@@ -86,9 +85,7 @@ interface StageDefinition {
 // step) would fail every stage with an opaque ENOENT and nothing pointing
 // at "wrong cwd" as the cause — the same failure mode resolvePythonBin()
 // was written to avoid for the interpreter. Building these from __dirname
-// makes correctness independent of the caller's cwd, matching
-// orchestrator/src/index.ts's IngestionOrchestrator, which already
-// resolves its script path this way.
+// makes correctness independent of the caller's cwd.
 const STAGES: StageDefinition[] = [
   { name: "crash", command: "python3", args: [path.join(PACKAGES_PY, "extractors", "crash", "main.py")] },
   { name: "ileapp", command: "python3", args: [path.join(PACKAGES_PY, "extractors", "ileapp_bridge", "main.py")] },
@@ -99,14 +96,14 @@ const STAGES: StageDefinition[] = [
   { name: "mvt_iocs", command: "python3", args: [path.join(PACKAGES_PY, "extractors", "mvt_iocs", "main.py")] },
   { name: "report", command: "python3", args: [path.join(PACKAGES_PY, "reporting", "generate_report.py")] },
 ];
-
+ 
 interface RunConfig {
   backupPath: string;
   resultsPath?: string;
   dbUrl: string;
   pythonBin: string;
 }
-
+ 
 /**
  * Resolves the Python interpreter every stage subprocess should use.
  * Prefers <repo-root>/.venv/bin/python (REPO_ROOT, computed once above
@@ -116,6 +113,12 @@ interface RunConfig {
  * found there, rather than failing outright — some environments (CI
  * containers, a globally-managed interpreter) may intentionally not use
  * a local .venv.
+ *
+ * This is the only orchestrator in the repo now. There used to be a second,
+ * class-based one (packages-ts/orchestrator/src/index.ts) that resolved its
+ * own venv path independently and shelled out to just the iLEAPP extractor;
+ * nothing imported it, `@verichron/orchestrator`'s package.json pointed
+ * consumers at its unused build output regardless, and it has been deleted.
  */
 async function resolvePythonBin(): Promise<string> {
   const venvPython = path.join(REPO_ROOT, ".venv", "bin", "python");
@@ -133,7 +136,7 @@ async function resolvePythonBin(): Promise<string> {
     return "python3";
   }
 }
-
+ 
 /**
  * Derives <workspace>/results/<name>/ from <workspace>/decrypted/<name>/
  * by swapping the one path segment mvt-runner's fixed layout guarantees
@@ -149,7 +152,7 @@ function deriveResultsPath(backupPath: string): string | undefined {
   parts[idx] = "results";
   return parts.join(path.sep);
 }
-
+ 
 /**
  * True if `backupPath` already has a pipeline_runs row that both finished
  * and had zero failed stages. Stage-level failures deliberately do NOT
@@ -173,7 +176,7 @@ async function hasSucceededRun(client: Client, backupPath: string): Promise<bool
   );
   return rows.length > 0;
 }
-
+ 
 async function createRun(client: Client, backupPath: string): Promise<string> {
   const runId = randomUUID();
   await client.query(
@@ -188,7 +191,7 @@ async function createRun(client: Client, backupPath: string): Promise<string> {
   }
   return runId;
 }
-
+ 
 async function markStage(
   client: Client,
   runId: string,
@@ -204,7 +207,7 @@ async function markStage(
     [status, errorMessage ?? null, runId, stageName]
   );
 }
-
+ 
 /**
  * Runs one stage as a subprocess. Resolves regardless of outcome —
  * failure is communicated via the returned status, never via a thrown
@@ -231,39 +234,39 @@ function runStage(
     const child = spawn(bin, [...stage.args, ...extraArgs], {
       stdio: ["ignore", "pipe", "pipe"],
     });
-
+ 
     let stderr = "";
     child.stderr?.on("data", (chunk) => {
       stderr += chunk.toString();
     });
-
+ 
     child.on("error", (err) => {
       // e.g. entrypoint doesn't exist yet — still don't throw, just report it
       resolve({ success: false, stderr: err.message });
     });
-
+ 
     child.on("close", (code) => {
       resolve({ success: code === 0, stderr: stderr.trim() });
     });
   });
 }
-
+ 
 interface CliConfig {
   backupPaths: string[];
   dbUrl: string;
 }
-
+ 
 function printUsage() {
   console.error(`Usage:
   main.ts --workspace <mvt-runner-workspace-dir>
       Discovers every backup already decrypted by mvt-runner under
       <workspace>/decrypted/*, and runs the full pipeline against each.
-
+ 
   main.ts <path-to-decrypted-backup> [<path> ...]
       Runs the full pipeline against one or more explicit decrypted-backup
       directories (bypassing mvt-runner's workspace convention).`);
 }
-
+ 
 async function parseCliConfig(): Promise<CliConfig> {
   const { values, positionals } = parseArgs({
     args: process.argv.slice(2),
@@ -272,9 +275,9 @@ async function parseCliConfig(): Promise<CliConfig> {
     },
     allowPositionals: true,
   });
-
+ 
   const dbUrl = process.env.DATABASE_URL ?? "postgresql://forensics:forensics_dev_only@localhost:5432/forensics";
-
+ 
   if (values.workspace) {
     const decryptedDir = path.join(values.workspace, "decrypted");
     let entries;
@@ -316,14 +319,14 @@ async function parseCliConfig(): Promise<CliConfig> {
     }
     return { backupPaths, dbUrl };
   }
-
+ 
   if (positionals.length === 0) {
     printUsage();
     process.exit(1);
   }
   return { backupPaths: positionals, dbUrl };
 }
-
+ 
 /**
  * Runs the full stage pipeline against a single backup. Never throws —
  * a backup-level failure (e.g. Postgres unreachable mid-run) is caught by
@@ -342,15 +345,15 @@ async function runPipelineForBackup(
   if (resultsPath) {
     console.log(`[orchestrator]   (results dir: ${resultsPath})`);
   }
-
+ 
   const results: { stage: string; success: boolean }[] = [];
-
+ 
   for (const stage of STAGES) {
     console.log(`[orchestrator] -> ${stage.name}`);
     await markStage(client, runId, stage.name, "running");
-
+ 
     const { success, stderr } = await runStage(stage, { backupPath, resultsPath, dbUrl, pythonBin }, runId);
-
+ 
     if (success) {
       await markStage(client, runId, stage.name, "succeeded");
       console.log(`[orchestrator]    ${stage.name} succeeded`);
@@ -359,26 +362,26 @@ async function runPipelineForBackup(
       console.error(`[orchestrator]    ${stage.name} FAILED — continuing to next stage`);
       if (stderr) console.error(`[orchestrator]    ${stderr}`);
     }
-
+ 
     results.push({ stage: stage.name, success });
   }
-
+ 
   await client.query(`UPDATE pipeline_runs SET finished_at = now() WHERE run_id = $1`, [runId]);
   return { runId, results };
 }
-
+ 
 async function main() {
   const cfg = await parseCliConfig();
   const pythonBin = await resolvePythonBin();
-
+ 
   const dbUrl = cfg.dbUrl;
   const client = new Client({ connectionString: dbUrl });
   await client.connect();
-
+ 
   console.log(`[orchestrator] processing ${cfg.backupPaths.length} backup(s)`);
-
+ 
   const summary: { backupPath: string; runId?: string; failedStages: string[]; error?: string; skipped?: boolean }[] = [];
-
+ 
   for (const backupPath of cfg.backupPaths) {
     if (await hasSucceededRun(client, backupPath)) {
       console.log(`\n[orchestrator] ===== ${backupPath} ===== (skipped — already fully succeeded)`);
@@ -400,9 +403,9 @@ async function main() {
       summary.push({ backupPath, failedStages: [], error: message });
     }
   }
-
+ 
   await client.end();
-
+ 
   console.log("\n[orchestrator] all backups processed");
   for (const s of summary) {
     if (s.skipped) {
@@ -415,14 +418,14 @@ async function main() {
       console.log(`  ${s.backupPath}: run ${s.runId} — failed stages: ${s.failedStages.join(", ")}`);
     }
   }
-
+ 
   const anyFailed = summary.some((s) => s.error || s.failedStages.length > 0);
   if (anyFailed) {
     console.log(`\n  -> fix and re-run against the same workspace/backups to fill in gaps`);
     console.log(`     (idempotent — already-succeeded stages will not be redone).`);
   }
 }
-
+ 
 main().catch((err) => {
   // This top-level catch is a last resort — it should only ever fire for
   // infrastructure problems (e.g. can't reach Postgres at all), never for

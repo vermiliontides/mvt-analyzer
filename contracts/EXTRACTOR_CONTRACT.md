@@ -117,31 +117,89 @@ Failure is expected and must be recoverable, not fatal:
   input independently — one missing/malformed file shouldn't block
   output from the other.
 
-## 6. Adding a new source_type
+## 6. Shared partial-failure tracking: `extractors/etl_run.py`
 
-1. Add the value to the `source_type` enum in
-   `contracts/normalized-record.schema.json` — the canonical schema — and
-   then run:
+Every built Python extractor (`crash`, `mvt_iocs`, `ileapp_bridge`) needs
+exactly the pattern described in #5 — count what succeeded, count what
+failed, remember why, decide the exit code, print a consistent summary.
+Before `etl_run.py` existed, each extractor hand-rolled that bookkeeping
+as three loose local variables plus a copy-pasted print/exit block at the
+bottom of `main()`. That duplication isn't just repetitive, it's a real
+correctness risk: `ileapp_bridge/main.py` once tracked malformed-record
+errors only as a stderr print with no corresponding failure count, so a
+file where every record failed to normalize still exited 0 — the
+orchestrator recorded that stage as `succeeded` while silently dropping
+the file's data. A new extractor copying the old pattern by hand could
+reintroduce that exact bug without anyone noticing until a report looked
+sparse.
 
-   ```
-   python3 scripts/sync_contracts.py --write
-   ```
+**New Python extractors must use `ETLRunResult` from
+`packages-py/extractors/etl_run.py` instead of re-deriving this
+bookkeeping.** The shape:
 
-   That regenerates the enum in `packages-py/contracts/normalized_record.py`
-   and `packages-ts/contracts/normalizedRecord.ts`. Do not hand-edit the enum
-   in either mirror; the generated block is overwritten.
+```python
+from etl_run import ETLRunResult
 
-   This step used to read "add the value in all three files in the same
-   commit". That instruction was followed for the mirrors and missed for the
-   canonical schema, so `ileapp_record` existed in Pydantic and Zod but not in
-   the JSON schema the adapters load — every iLEAPP record constructed fine
-   and then failed JSON-schema validation. `sync_contracts.py --check` runs in
-   CI and fails the build on that class of drift, so the agreement is no
-   longer something anyone has to remember.
+def process_something(conn, run_id, ...) -> ETLRunResult:
+    result = ETLRunResult()
+    for item in items:
+        try:
+            record = build_record(item)          # extract + transform
+            write_record(conn, run_id, file_hash, record)  # load
+            result.ok()
+        except Exception as e:
+            result.fail(item_label, e)            # isolated, not fatal
+    return result
+
+def main():
+    ...
+    result = process_something(conn, args.run_id, ...)
+    result.print_summary("your-tag")   # "[your-tag] N succeeded, M failed"
+    sys.exit(result.exit_code)         # 0 iff nothing failed
+```
+
+- `result.ok(n=1)` — record `n` items that completed successfully. Call it
+  once per unit of partial failure your extractor tracks (a file for
+  `crash`, a record for `mvt_iocs`/`ileapp_bridge`) — not once per row
+  written, if one item can produce several rows.
+- `result.fail(item_label, error)` — record one failed item with an
+  actionable label (filename, alert index, row number). This is what §5's
+  "isolate, don't abort" requirement looks like in code.
+- `result.note(message)` — for an expected, non-failure condition that
+  should still be visible (e.g. an optional input file simply wasn't
+  present for this backup). Distinct from `fail()`: a note never affects
+  `exit_code`.
+- `result.merge(other)` — combine two independently-tracked
+  `ETLRunResult`s into one exit-code decision. Use this for the
+  multi-input case in §5's last bullet — process each input into its own
+  `ETLRunResult`, then `merge()` before deciding whether the stage
+  succeeded.
+- `result.print_summary(tag)` / `result.exit_code` — the standard
+  `[tag] N succeeded, M failed` stderr/stdout output and the 0/1 exit
+  decision, so every stage's CLI output has the same shape regardless of
+  which extractor produced it.
+
+See `extractors/crash/main.py` (single-input, one item = one file),
+`extractors/mvt_iocs/main.py` (two independent inputs, combined via
+`merge()`), and `extractors/ileapp_bridge/main.py` (one item = one
+artifact file, each producing many rows) for the three shapes a new
+extractor is likely to need.
+
+TypeScript extractors don't have `etl_run.py` available (it's Python-only,
+importable via `sys.path.insert(0, str(_EXTRACTORS_DIR))` the same way
+`db_writer.py` is) — a TS extractor should implement the equivalent shape
+by hand until/unless a TS port is written, and should still follow the
+same `ok`/`fail`/`merge`/`exit_code` semantics described above for
+consistency with every other stage's output.
+
+## 7. Adding a new source_type
+
+1. Add the value to the `source_type` enum in all three contract files
+   (`.schema.json`, `.py`, `.ts`) — same commit.
 2. Add a migration if you need a new index on something inside `fields`
    you'll query often (GIN index already covers ad hoc lookups; a
    dedicated index is only needed if a query is slow in practice).
 3. Write your extractor under `/extractors/<name>/` with its own README
    documenting: expected input shape, the sub-shape of `fields` it
-   produces, and its chosen partial-failure behavior (see #5).
+   produces, and its chosen partial-failure behavior (see #5, #6).
 4. Register the stage name in `packages-ts/orchestrator/main-orchestrator/main.ts`'s stage list.

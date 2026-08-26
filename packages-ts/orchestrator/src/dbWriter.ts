@@ -32,18 +32,18 @@
  * `writeRecord`/`writeRecords` are still exported for use inside a unit and no
  * longer manage transactions themselves.
  */
-
+ 
 import * as crypto from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import type { Client, PoolClient } from 'pg';
-
+ 
 import { NormalizedRecord as NormalizedRecordSchema } from '@verichron/contracts';
 import type { NormalizedRecord as NormalizedRecordShape } from '@verichron/contracts';
-
+ 
 export const DEFAULT_DB_URL = 'postgresql://forensics:forensics_dev_only@localhost:5432/forensics';
-
+ 
 type Db = Client | PoolClient;
-
+ 
 /**
  * sha256 of file contents — the idempotency key for ingested_files.
  *
@@ -56,14 +56,14 @@ type Db = Client | PoolClient;
 export async function computeFileHash(filePath: string): Promise<string> {
   const hash = crypto.createHash('sha256');
   const stream = createReadStream(filePath, { highWaterMark: 1024 * 1024 });
-
+ 
   return new Promise<string>((resolve, reject) => {
     stream.on('data', (chunk) => hash.update(chunk));
     stream.on('error', reject);
     stream.on('end', () => resolve(hash.digest('hex')));
   });
 }
-
+ 
 export interface IngestParams {
   runId: string;
   filePath: string;
@@ -71,13 +71,13 @@ export interface IngestParams {
   /** Attach now if known; otherwise call `unit.setRawPayload()` after parsing. */
   rawPayload?: Record<string, unknown>;
 }
-
+ 
 /**
  * One file's worth of work, inside one transaction. Nothing here commits.
  */
 export class IngestUnit {
   public recordsWritten = 0;
-
+ 
   constructor(
     private readonly client: Db,
     private readonly runId: string,
@@ -86,7 +86,7 @@ export class IngestUnit {
     /** True only when a previous run marked this file COMPLETE. */
     public readonly alreadyIngested: boolean
   ) {}
-
+ 
   /** Write validated records for this file. Callable more than once. */
   public async write(records: NormalizedRecordShape[]): Promise<number> {
     this.guard();
@@ -94,13 +94,13 @@ export class IngestUnit {
     this.recordsWritten += written;
     return written;
   }
-
+ 
   public async writeOne(record: NormalizedRecordShape): Promise<void> {
     this.guard();
     await writeRecord(this.client, this.runId, this.fileHash, record);
     this.recordsWritten += 1;
   }
-
+ 
   /**
    * Attach the parsed payload to the ledger row, in this same transaction.
    * For extractors that can only build the payload after parsing.
@@ -112,7 +112,7 @@ export class IngestUnit {
       this.fileHash,
     ]);
   }
-
+ 
   private guard(): void {
     if (this.alreadyIngested) {
       throw new Error(
@@ -124,7 +124,7 @@ export class IngestUnit {
     }
   }
 }
-
+ 
 export interface IngestOutcome<T> {
   fileHash: string;
   alreadyIngested: boolean;
@@ -132,7 +132,7 @@ export interface IngestOutcome<T> {
   /** Whatever the body returned. */
   value: T;
 }
-
+ 
 /**
  * Atomic ingest of one file: ledger row + records + completion flag, or nothing.
  *
@@ -162,7 +162,7 @@ export async function ingest<T>(
 ): Promise<IngestOutcome<T>> {
   const { runId, filePath, sourceType, rawPayload } = params;
   const fileHash = await computeFileHash(filePath);
-
+ 
   // Fast path for a re-run: the file is already complete, so there is nothing
   // to lock, write, commit or roll back. This read is intentionally outside a
   // transaction, which is safe because ingest_complete is monotonic — it goes
@@ -173,7 +173,7 @@ export async function ingest<T>(
     'SELECT ingest_complete FROM ingested_files WHERE file_hash = $1',
     [fileHash]
   );
-
+ 
   if (preflight.rows[0]?.ingest_complete) {
     // No BEGIN was issued, and node-postgres autocommits, so unlike the Python
     // version there is no implicit transaction left open by that SELECT and
@@ -181,9 +181,9 @@ export async function ingest<T>(
     const unit = new IngestUnit(client, runId, filePath, fileHash, true);
     return { fileHash, alreadyIngested: true, recordsWritten: 0, value: await body(unit) };
   }
-
+ 
   await client.query('BEGIN');
-
+ 
   try {
     // Upsert-and-lock. Returns the row's completion state either way. A row
     // that is already complete keeps every original value: a finished ingest is
@@ -215,26 +215,26 @@ export async function ingest<T>(
         rawPayload ?? {},
       ]
     );
-
+ 
     const alreadyIngested = claimed.rows[0]?.ingest_complete === true;
-
+ 
     if (!alreadyIngested) {
       // Reclaim an abandoned unit. A no-op for a row just inserted; for a
       // stranded one it clears partial records so this run's write is the only
       // contribution.
       await client.query('DELETE FROM forensic_records WHERE file_hash = $1', [fileHash]);
     }
-
+ 
     const unit = new IngestUnit(client, runId, filePath, fileHash, alreadyIngested);
     const value = await body(unit);
-
+ 
     if (alreadyIngested) {
       // Another process completed this file between the preflight read and the
       // upsert. Nothing was written and nothing should be; release the row lock.
       await client.query('ROLLBACK');
       return { fileHash, alreadyIngested: true, recordsWritten: 0, value };
     }
-
+ 
     await client.query(
       `UPDATE ingested_files
           SET ingest_complete = TRUE,
@@ -244,7 +244,7 @@ export async function ingest<T>(
       [unit.recordsWritten, fileHash]
     );
     await client.query('COMMIT');
-
+ 
     return { fileHash, alreadyIngested: false, recordsWritten: unit.recordsWritten, value };
   } catch (error) {
     try {
@@ -258,7 +258,7 @@ export async function ingest<T>(
     throw error;
   }
 }
-
+ 
 /**
  * Insert one validated NormalizedRecord into forensic_records.
  *
@@ -272,7 +272,7 @@ export async function writeRecord(
   record: NormalizedRecordShape
 ): Promise<void> {
   const validated = NormalizedRecordSchema.parse(record);
-
+ 
   await client.query(
     `INSERT INTO forensic_records
       (file_hash, run_id, incident_id, source_type, event_time,
@@ -292,7 +292,7 @@ export async function writeRecord(
     ]
   );
 }
-
+ 
 /**
  * Bulk form of writeRecord. Does NOT manage a transaction.
  *
@@ -305,7 +305,7 @@ export async function writeRecord(
 const MAX_PARAMS_PER_STATEMENT = 65535;
 const COLUMNS_PER_RECORD = 10;
 export const MAX_RECORDS_PER_STATEMENT = Math.floor(MAX_PARAMS_PER_STATEMENT / COLUMNS_PER_RECORD);
-
+ 
 export async function writeRecords(
   client: Db,
   runId: string,
@@ -315,12 +315,12 @@ export async function writeRecords(
   if (records.length === 0) {
     return 0;
   }
-
+ 
   for (let offset = 0; offset < records.length; offset += MAX_RECORDS_PER_STATEMENT) {
     const chunk = records.slice(offset, offset + MAX_RECORDS_PER_STATEMENT);
     const values: string[] = [];
     const params: unknown[] = [];
-
+ 
     chunk.forEach((record, index) => {
       const validated = NormalizedRecordSchema.parse(record);
       const base = index * COLUMNS_PER_RECORD;
@@ -340,7 +340,7 @@ export async function writeRecords(
         validated.fields
       );
     });
-
+ 
     await client.query(
       `INSERT INTO forensic_records
         (file_hash, run_id, incident_id, source_type, event_time,
@@ -349,10 +349,10 @@ export async function writeRecords(
       params
     );
   }
-
+ 
   return records.length;
 }
-
+ 
 /**
  * Ledger rows that were started and never finished.
  *
@@ -374,3 +374,4 @@ export async function incompleteIngests(
   );
   return result.rows.map((row) => ({ fileHash: row.file_hash, filePath: row.file_path }));
 }
+o
