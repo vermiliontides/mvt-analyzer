@@ -374,4 +374,3 @@ export async function incompleteIngests(
   );
   return result.rows.map((row) => ({ fileHash: row.file_hash, filePath: row.file_path }));
 }
-o
