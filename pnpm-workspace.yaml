@@ -2,6 +2,8 @@
 packages:
   - 'epoch'
   - 'packages-ts/*'
+  - 'packages-ts/orchestrator/*'
 allowBuilds:
   electron: false
   esbuild: false
+ 

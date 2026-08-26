@@ -118,7 +118,10 @@ interface RunConfig {
  * class-based one (packages-ts/orchestrator/src/index.ts) that resolved its
  * own venv path independently and shelled out to just the iLEAPP extractor;
  * nothing imported it, `@verichron/orchestrator`'s package.json pointed
- * consumers at its unused build output regardless, and it has been deleted.
+ * consumers at its unused build output regardless. It has NOT been deleted —
+ * packages-ts/orchestrator/src/index.ts and its sibling dbWriter.ts are still
+ * present and still unused; removing them is tracked separately (see M1 in
+ * the repo's code review backlog) rather than done here.
  */
 async function resolvePythonBin(): Promise<string> {
   const venvPython = path.join(REPO_ROOT, ".venv", "bin", "python");
